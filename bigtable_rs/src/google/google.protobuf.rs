@@ -204,17 +204,7 @@ pub mod field_descriptor_proto {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum Type {
         /// 0 is reserved for errors.
@@ -305,17 +295,7 @@ pub mod field_descriptor_proto {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum Label {
         /// 0 is reserved for errors
@@ -375,9 +355,7 @@ pub struct EnumDescriptorProto {
     /// by enum values in the same enum declaration. Reserved ranges may not
     /// overlap.
     #[prost(message, repeated, tag = "4")]
-    pub reserved_range: ::prost::alloc::vec::Vec<
-        enum_descriptor_proto::EnumReservedRange,
-    >,
+    pub reserved_range: ::prost::alloc::vec::Vec<enum_descriptor_proto::EnumReservedRange>,
     /// Reserved enum value names, which may not be reused. A given name may only
     /// be reserved once.
     #[prost(string, repeated, tag = "5")]
@@ -582,17 +560,7 @@ pub mod file_options {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum OptimizeMode {
         /// Generate complete code for parsing, serialization,
@@ -780,17 +748,7 @@ pub mod field_options {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum CType {
         /// Default mode.
@@ -823,17 +781,7 @@ pub mod field_options {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum JsType {
         /// Use the default type.
@@ -959,17 +907,7 @@ pub mod method_options {
     #[serde_with::serde_as]
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum IdempotencyLevel {
         IdempotencyUnknown = 0,
@@ -1196,9 +1134,7 @@ pub mod source_code_info {
         #[prost(string, optional, tag = "4")]
         pub trailing_comments: ::core::option::Option<::prost::alloc::string::String>,
         #[prost(string, repeated, tag = "6")]
-        pub leading_detached_comments: ::prost::alloc::vec::Vec<
-            ::prost::alloc::string::String,
-        >,
+        pub leading_detached_comments: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     }
 }
 /// Describes the relationship between generated code and its original source
