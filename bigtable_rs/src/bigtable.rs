@@ -284,8 +284,9 @@ impl BigTableConnection {
                 let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
                 let table_prefix = format!("{instance_prefix}/tables/");
 
-                let (channel, tx) = Channel::balance_channel(1024);
-                for i in 0..channel_size.max(1) {
+                let channel_size = channel_size.max(1);
+                let (channel, tx) = Channel::balance_channel(channel_size);
+                for i in 0..channel_size {
                     let endpoint = Channel::from_static("https://bigtable.googleapis.com")
                         .tls_config(
                             ClientTlsConfig::new()
