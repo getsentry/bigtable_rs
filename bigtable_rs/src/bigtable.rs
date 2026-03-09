@@ -92,18 +92,20 @@ use std::time::Duration;
 
 use futures_util::Stream;
 use gcp_auth::TokenProvider;
+use http::{Request, Response};
 use log::info;
 use thiserror::Error;
 use tokio::net::UnixStream;
+use tonic::body::Body;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Endpoint;
 use tonic::IntoRequest;
 use tonic::{
     codec::Streaming,
     transport::{channel::Change, Channel, ClientTlsConfig},
-    Response,
+    Response as TonicResponse,
 };
-use tower::ServiceBuilder;
+use tower::{Service, ServiceBuilder};
 
 use crate::auth_service::AuthSvc;
 use crate::bigtable::read_rows::{decode_read_rows_response, decode_read_rows_response_stream};
@@ -196,8 +198,8 @@ impl std::convert::From<tonic::Status> for Error {
 
 /// For initiate a Bigtable connection, then a `Bigtable` client can be made from it.
 #[derive(Clone)]
-pub struct BigTableConnection {
-    client: BigtableClient<AuthSvc>,
+pub struct BigTableConnection<S = Channel> {
+    client: BigtableClient<AuthSvc<S>>,
     table_prefix: Arc<String>,
     instance_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
@@ -390,12 +392,19 @@ impl BigTableConnection {
             timeout: Arc::new(timeout),
         })
     }
+}
 
+impl<S> BigTableConnection<S>
+where
+    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S::Future: Send,
+{
     /// Create a new BigTable client by cloning needed properties.
     ///
     /// Clients require `&mut self`, due to `Tonic::transport::Channel` limitations, however
     /// the created new clients can be cheaply cloned and thus can be send to different threads
-    pub fn client(&self) -> BigTable {
+    pub fn client(&self) -> BigTable<S> {
         BigTable {
             client: self.client.clone(),
             instance_prefix: self.instance_prefix.clone(),
@@ -407,19 +416,24 @@ impl BigTableConnection {
     /// Provide a convenient method to update the inner `BigtableClient` so a newly configured client can be set
     pub fn configure_inner_client(
         &mut self,
-        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
+        config_fn: fn(BigtableClient<AuthSvc<S>>) -> BigtableClient<AuthSvc<S>>,
     ) {
         self.client = config_fn(self.client.clone());
     }
 }
 
-/// Helper function to create a BigtableClient<AuthSvc>
-/// from a channel.
-fn create_client(
-    channel: Channel,
+/// Helper function to create a BigtableClient<AuthSvc<S>>
+/// from a service.
+fn create_client<S>(
+    service: S,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
-) -> BigtableClient<AuthSvc> {
+) -> BigtableClient<AuthSvc<S>>
+where
+    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S::Future: Send,
+{
     let scopes = if read_only {
         "https://www.googleapis.com/auth/bigtable.data.readonly"
     } else {
@@ -428,8 +442,8 @@ fn create_client(
 
     let auth_svc = ServiceBuilder::new()
         .layer_fn(|c| AuthSvc::new(c, token_provider.clone(), scopes.to_string()))
-        .service(channel);
-    return BigtableClient::new(auth_svc);
+        .service(service);
+    BigtableClient::new(auth_svc)
 }
 
 /// The core struct for Bigtable client, which wraps a gPRC client defined by Bigtable proto.
@@ -450,15 +464,20 @@ fn create_client(
 /// }
 /// ```
 #[derive(Clone)]
-pub struct BigTable {
+pub struct BigTable<S = Channel> {
     // clone is cheap with Channel, see https://docs.rs/tonic/latest/tonic/transport/struct.Channel.html
-    client: BigtableClient<AuthSvc>,
+    client: BigtableClient<AuthSvc<S>>,
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
 }
 
-impl BigTable {
+impl<S> BigTable<S>
+where
+    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S::Future: Send,
+{
     /// Wrapped `check_and_mutate_row` method
     pub async fn check_and_mutate_row(
         &mut self,
@@ -535,7 +554,7 @@ impl BigTable {
     pub async fn mutate_row(
         &mut self,
         request: MutateRowRequest,
-    ) -> Result<Response<MutateRowResponse>> {
+    ) -> Result<TonicResponse<MutateRowResponse>> {
         let response = self.client.mutate_row(request).await?;
         Ok(response)
     }
@@ -571,14 +590,14 @@ impl BigTable {
 
     /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
     /// defined from the Bigtable V2 gRPC API
-    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc> {
+    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc<S>> {
         &mut self.client
     }
 
     /// Provide a convenient method to update the inner `BigtableClient` config
     pub fn configure_inner_client(
         &mut self,
-        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
+        config_fn: fn(BigtableClient<AuthSvc<S>>) -> BigtableClient<AuthSvc<S>>,
     ) {
         self.client = config_fn(self.client.clone());
     }

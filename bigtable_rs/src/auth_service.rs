@@ -7,19 +7,18 @@ use gcp_auth::TokenProvider;
 use http::{HeaderValue, Request, Response};
 use log::debug;
 use tonic::body::Body;
-use tonic::transport::Channel;
 use tower::Service;
 
 #[derive(Clone)]
-pub struct AuthSvc {
-    inner: Channel,
+pub struct AuthSvc<S = tonic::transport::Channel> {
+    inner: S,
     token_provider: Option<Arc<dyn TokenProvider>>,
     scopes: String,
 }
 
-impl AuthSvc {
+impl<S> AuthSvc<S> {
     pub fn new(
-        inner: Channel,
+        inner: S,
         authentication_manager: Option<Arc<dyn TokenProvider>>,
         scopes: String,
     ) -> Self {
@@ -31,7 +30,12 @@ impl AuthSvc {
     }
 }
 
-impl Service<Request<Body>> for AuthSvc {
+impl<S> Service<Request<Body>> for AuthSvc<S>
+where
+    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S::Future: Send,
+{
     type Response = Response<Body>;
     type Error = Box<dyn std::error::Error + Send + Sync>;
     #[allow(clippy::type_complexity)]
@@ -57,7 +61,7 @@ impl Service<Request<Body>> for AuthSvc {
             return match token_f_opt {
                 None => {
                     debug!("auth intercepting and not attaching token");
-                    let response = inner.call(request).await?;
+                    let response = inner.call(request).await.map_err(Into::into)?;
                     Ok(response)
                 }
                 Some(token_future) => {
@@ -72,7 +76,7 @@ impl Service<Request<Body>> for AuthSvc {
                         std::str::from_utf8(&token.as_bytes()[..5]).unwrap_or("")
                     );
                     request.headers_mut().insert("authorization", bearer_header);
-                    let response = inner.call(request).await?;
+                    let response = inner.call(request).await.map_err(Into::into)?;
                     Ok(response)
                 }
             };
