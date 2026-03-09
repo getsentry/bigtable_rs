@@ -92,7 +92,7 @@ use std::time::Duration;
 
 use futures_util::Stream;
 use gcp_auth::TokenProvider;
-use http::{Request, Response};
+use http::{Request as HttpRequest, Response as HttpResponse};
 use log::info;
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -103,7 +103,7 @@ use tonic::IntoRequest;
 use tonic::{
     codec::Streaming,
     transport::{channel::Change, Channel, ClientTlsConfig},
-    Response as TonicResponse,
+    Response,
 };
 use tower::{Service, ServiceBuilder};
 
@@ -396,9 +396,7 @@ impl BigTableConnection {
 
 impl<S> BigTableConnection<S>
 where
-    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
-    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    S::Future: Send,
+    S: Clone,
 {
     /// Create a new BigTable client by cloning needed properties.
     ///
@@ -430,7 +428,7 @@ fn create_client<S>(
     read_only: bool,
 ) -> BigtableClient<AuthSvc<S>>
 where
-    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
     S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     S::Future: Send,
 {
@@ -472,9 +470,35 @@ pub struct BigTable<S = Channel> {
     timeout: Arc<Option<Duration>>,
 }
 
+impl<S> BigTable<S> {
+    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
+    /// defined from the Bigtable V2 gRPC API
+    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc<S>> {
+        &mut self.client
+    }
+
+    /// Provide a convenient method to get full table, which can be used for building requests
+    pub fn get_full_table_name(&self, table_name: &str) -> String {
+        [&self.table_prefix, table_name].concat()
+    }
+}
+
 impl<S> BigTable<S>
 where
-    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
+    S: Clone,
+{
+    /// Provide a convenient method to update the inner `BigtableClient` config
+    pub fn configure_inner_client(
+        &mut self,
+        config_fn: fn(BigtableClient<AuthSvc<S>>) -> BigtableClient<AuthSvc<S>>,
+    ) {
+        self.client = config_fn(self.client.clone());
+    }
+}
+
+impl<S> BigTable<S>
+where
+    S: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
     S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     S::Future: Send,
 {
@@ -554,7 +578,7 @@ where
     pub async fn mutate_row(
         &mut self,
         request: MutateRowRequest,
-    ) -> Result<TonicResponse<MutateRowResponse>> {
+    ) -> Result<Response<MutateRowResponse>> {
         let response = self.client.mutate_row(request).await?;
         Ok(response)
     }
@@ -586,24 +610,5 @@ where
         );
         let response = self.client.execute_query(tonic_req).await?.into_inner();
         Ok(response)
-    }
-
-    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
-    /// defined from the Bigtable V2 gRPC API
-    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc<S>> {
-        &mut self.client
-    }
-
-    /// Provide a convenient method to update the inner `BigtableClient` config
-    pub fn configure_inner_client(
-        &mut self,
-        config_fn: fn(BigtableClient<AuthSvc<S>>) -> BigtableClient<AuthSvc<S>>,
-    ) {
-        self.client = config_fn(self.client.clone());
-    }
-
-    /// Provide a convenient method to get full table, which can be used for building requests
-    pub fn get_full_table_name(&self, table_name: &str) -> String {
-        [&self.table_prefix, table_name].concat()
     }
 }
