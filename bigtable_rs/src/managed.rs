@@ -102,7 +102,10 @@ impl ManagedConnectionBuilder {
     }
 
     pub async fn build(self) -> Result<BigTableConnection<ChannelPool>> {
-        let token_provider = self.token_provider.unwrap_or(gcp_auth::provider().await?);
+        let token_provider = match self.token_provider {
+            Some(provider) => provider,
+            None => gcp_auth::provider().await?,
+        };
 
         let (channel, tx) = Channel::balance_channel(1024);
         for i in 0..1 {
