@@ -41,7 +41,63 @@ impl ManagedConnectionBuilder {
             scale_down_threshold: 1,
             prime_channels: true,
 
-            max_connection_age: Some(Duration::from_mins(45)),
+            max_connection_age: None,
+        }
+    }
+
+    pub fn timeout(self, timeout: Duration) -> Self {
+        Self {
+            timeout: Some(timeout),
+            ..self
+        }
+    }
+
+    pub fn token_provider(self, token_provider: Arc<dyn TokenProvider>) -> Self {
+        Self {
+            token_provider: Some(token_provider),
+            ..self
+        }
+    }
+
+    pub fn min_channels(self, min_channels: usize) -> Self {
+        Self {
+            min_channels,
+            ..self
+        }
+    }
+
+    pub fn max_channels(self, max_channels: usize) -> Self {
+        Self {
+            max_channels,
+            ..self
+        }
+    }
+
+    pub fn scale_up_threshold(self, scale_up_threshold: usize) -> Self {
+        Self {
+            scale_up_threshold,
+            ..self
+        }
+    }
+
+    pub fn scale_down_threshold(self, scale_down_threshold: usize) -> Self {
+        Self {
+            scale_down_threshold,
+            ..self
+        }
+    }
+
+    pub fn prime_channels(self, prime_channels: bool) -> Self {
+        Self {
+            prime_channels,
+            ..self
+        }
+    }
+
+    pub fn max_connection_age(self, max_connection_age: Duration) -> Self {
+        Self {
+            max_connection_age: Some(max_connection_age),
+            ..self
         }
     }
 
