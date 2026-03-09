@@ -333,6 +333,7 @@ impl BigTableConnection {
         })
     }
 
+    /// Returns a builder to create a managed BigTable connection with configurable channel pooling.
     pub fn new_managed(
         project_id: &str,
         instance_name: &str,
