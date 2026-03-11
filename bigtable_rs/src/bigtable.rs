@@ -470,8 +470,8 @@ impl ChannelManager {
     ) -> Self {
         Self {
             endpoint,
-            token_provider: token_provider.clone(),
-            instance_prefix: instance_prefix.clone(),
+            token_provider,
+            instance_prefix,
             num_channels: num_channels.max(1),
             prime_channels,
             app_profile_id,
@@ -659,9 +659,9 @@ where
     }
 }
 
-/// Helper function to create a BigtableClient<AuthSvc<S>>
+/// Helper function to create a BigtableClient<AuthSvc<Transport>>
 /// from a transport.
-pub fn create_client<Transport>(
+fn create_client<Transport>(
     transport: Transport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
