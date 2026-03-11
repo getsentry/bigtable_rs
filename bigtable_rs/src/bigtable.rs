@@ -480,7 +480,8 @@ impl ChannelManager {
         }
     }
 
-    async fn seed(&mut self) -> Result<()> {
+    // Creates the initial channel pool.
+    async fn seed(&self) -> Result<()> {
         for i in 0..self.num_channels {
             let channel = create_channel(
                 self.endpoint.clone(),
@@ -505,6 +506,13 @@ impl ChannelManager {
         tasks.spawn(async move { self.run().await });
     }
 
+    // Pre-emptively refreshes the channels every `max_connection_age`.
+    //
+    // Channel refresh is best-effort. If creating or priming a channel fails, we log a warning.
+    // In case the pre-emptive refresh fails, causing a channel to stay alive for too long and
+    // eventually be killed by the server, the underlying tonic `Channel` will handle this for us
+    // transparently, but lazily.
+    // Pre-emptive refresh is intended to prevent the possible latency spike that the lazy reconnection might cause.
     async fn run(&mut self) {
         let Some(max_age) = self.max_connection_age else {
             return;
@@ -543,22 +551,25 @@ impl ChannelManager {
 
 impl BigTableConnection<ManagedTransport> {
     /// Returns a managed BigTable connection with a background channel manager
-    /// that dynamically scales the number of gRPC channels based on load.
+    /// that pre-emptively refreshes channels every `max_connection_age`, optionally priming them
+    /// with [`PingAndWarmRequest`].
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
         is_read_only: bool,
-        channel_size: usize,
         timeout: Option<Duration>,
         token_provider: Arc<dyn TokenProvider>,
+        num_channels: usize,
         prime_channels: bool,
         app_profile_id: Option<String>,
-        max_connection_age: Option<Duration>,
+        max_channel_age: Option<Duration>,
     ) -> Result<Self> {
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
         let table_prefix = format!("{instance_prefix}/tables/");
         let endpoint = create_endpoint(timeout)?;
 
+        // Analogous to what `tonic::transport::channel::Channel::balance_channel` constructs
+        // internally.
         let (tx, rx) = channel(1024);
         let stream = ChannelStream::new(rx);
         let balance = Balance::new(stream);
@@ -568,14 +579,14 @@ impl BigTableConnection<ManagedTransport> {
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
 
-        let mut manager = ChannelManager::new(
+        let manager = ChannelManager::new(
             endpoint,
             token_provider.clone(),
             instance_prefix.clone(),
-            channel_size,
+            num_channels,
             prime_channels,
             app_profile_id,
-            max_connection_age,
+            max_channel_age,
             tx,
         );
         manager.seed().await?;
@@ -591,6 +602,8 @@ impl BigTableConnection<ManagedTransport> {
     }
 }
 
+// Analogous to `tonic::transport::channel::service::discover::DynamicServiceStream`, which `tonic`
+// itself doesn't expose.
 struct ChannelStream {
     changes: Receiver<ChannelChange>,
 }
