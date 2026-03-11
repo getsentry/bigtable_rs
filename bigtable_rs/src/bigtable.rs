@@ -86,24 +86,37 @@
 //! }
 //! ```
 
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::Stream;
 use gcp_auth::TokenProvider;
-use log::info;
-use thiserror::Error;
+use http::{Request as HttpRequest, Response as HttpResponse};
+use log::{info, warn};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{channel, Sender};
+use tonic::body::Body;
 use tonic::metadata::MetadataValue;
+use tonic::transport::channel::Change;
 use tonic::transport::Endpoint;
 use tonic::IntoRequest;
 use tonic::{
     codec::Streaming,
-    transport::{channel::Change, Channel, ClientTlsConfig},
+    transport::{Channel, ClientTlsConfig},
     Response,
 };
-use tower::ServiceBuilder;
+use tower::discover::Change as TowerChange;
+use tower::load::{CompleteOnResponse, PendingRequests};
+use tower::util::BoxService;
+use tower::{balance::p2c::Balance, buffer::Buffer};
+use tower::{BoxError, Service, ServiceBuilder};
 
 use crate::auth_service::AuthSvc;
 use crate::bigtable::read_rows::{decode_read_rows_response, decode_read_rows_response_stream};
@@ -113,15 +126,17 @@ use crate::google::bigtable::v2::{
 };
 use crate::google::bigtable::v2::{
     CheckAndMutateRowRequest, CheckAndMutateRowResponse, ExecuteQueryRequest, ExecuteQueryResponse,
+    PingAndWarmRequest,
 };
+use crate::Result;
 use crate::{root_ca_certificate, util::get_row_range_from_prefix};
+
+pub use crate::Error;
 
 pub mod read_rows;
 
 /// An alias for Vec<u8> as row key
 type RowKey = Vec<u8>;
-/// A convenient Result type
-type Result<T> = std::result::Result<T, Error>;
 
 /// A data structure for returning the read content of a cell in a row.
 #[derive(Debug)]
@@ -133,74 +148,15 @@ pub struct RowCell {
     pub labels: Vec<String>,
 }
 
-/// Error types the client may have
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("AccessToken error: {0}")]
-    AccessTokenError(String),
-
-    #[error("Certificate error: {0}")]
-    CertificateError(String),
-
-    #[error("I/O Error: {0}")]
-    IoError(std::io::Error),
-
-    #[error("Transport error: {0}")]
-    TransportError(tonic::transport::Error),
-
-    #[error("Chunk error")]
-    ChunkError(String),
-
-    #[error("Row not found")]
-    RowNotFound,
-
-    #[error("Row write failed")]
-    RowWriteFailed,
-
-    #[error("Object not found: {0}")]
-    ObjectNotFound(String),
-
-    #[error("Object is corrupt: {0}")]
-    ObjectCorrupt(String),
-
-    #[error("RPC error: {0}")]
-    RpcError(tonic::Status),
-
-    #[error("Timeout error after {0} seconds")]
-    TimeoutError(u64),
-
-    #[error("GCPAuthError error: {0}")]
-    GCPAuthError(#[from] gcp_auth::Error),
-
-    #[error("Invalid metadata")]
-    MetadataError(tonic::metadata::errors::InvalidMetadataValue),
-}
-
-impl std::convert::From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Self::IoError(err)
-    }
-}
-
-impl std::convert::From<tonic::transport::Error> for Error {
-    fn from(err: tonic::transport::Error) -> Self {
-        Self::TransportError(err)
-    }
-}
-
-impl std::convert::From<tonic::Status> for Error {
-    fn from(err: tonic::Status) -> Self {
-        Self::RpcError(err)
-    }
-}
-
 /// For initiate a Bigtable connection, then a `Bigtable` client can be made from it.
 #[derive(Clone)]
-pub struct BigTableConnection {
-    client: BigtableClient<AuthSvc>,
-    table_prefix: Arc<String>,
-    instance_prefix: Arc<String>,
-    timeout: Arc<Option<Duration>>,
+pub struct BigTableConnection<Transport = Channel> {
+    pub(crate) client: BigtableClient<AuthSvc<Transport>>,
+    pub(crate) table_prefix: Arc<String>,
+    pub(crate) instance_prefix: Arc<String>,
+    pub(crate) timeout: Arc<Option<Duration>>,
+    // When the last clone is dropped, aborts all background tasks (if any).
+    _handles: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTableConnection {
@@ -286,26 +242,7 @@ impl BigTableConnection {
 
                 let (channel, tx) = Channel::balance_channel(1024);
                 for i in 0..channel_size.max(1) {
-                    let endpoint = Channel::from_static("https://bigtable.googleapis.com")
-                        .tls_config(
-                            ClientTlsConfig::new()
-                                .ca_certificate(
-                                    root_ca_certificate::load()
-                                        .map_err(Error::CertificateError)
-                                        .expect("root certificate error"),
-                                )
-                                .domain_name("bigtable.googleapis.com"),
-                        )
-                        .map_err(Error::TransportError)?
-                        .http2_keep_alive_interval(Duration::from_secs(60))
-                        .keep_alive_while_idle(true);
-
-                    let endpoint = if let Some(timeout) = timeout {
-                        endpoint.timeout(timeout)
-                    } else {
-                        endpoint
-                    };
-
+                    let endpoint = create_endpoint(timeout)?;
                     // Use unique keys to ensure each channel has a dedicated HTTP connection
                     tx.try_send(Change::Insert(i, endpoint)).unwrap();
                 }
@@ -316,6 +253,7 @@ impl BigTableConnection {
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
+                    _handles: None,
                 })
             }
         }
@@ -388,14 +326,247 @@ impl BigTableConnection {
                 project_id, instance_name
             )),
             timeout: Arc::new(timeout),
+            _handles: None,
         })
     }
+}
 
+fn create_endpoint(timeout: Option<Duration>) -> Result<Endpoint> {
+    let endpoint = Channel::from_static("https://bigtable.googleapis.com")
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(
+                    root_ca_certificate::load()
+                        .map_err(Error::CertificateError)
+                        .expect("root certificate error"),
+                )
+                .domain_name("bigtable.googleapis.com"),
+        )
+        .map_err(Error::TransportError)?
+        .http2_keep_alive_interval(Duration::from_secs(60))
+        .keep_alive_while_idle(true);
+
+    let endpoint = if let Some(timeout) = timeout {
+        endpoint.timeout(timeout)
+    } else {
+        endpoint
+    };
+
+    Ok(endpoint)
+}
+
+async fn create_channel(
+    endpoint: Endpoint,
+    prime: bool,
+    token_provider: Arc<dyn TokenProvider>,
+    instance_prefix: String,
+    app_profile_id: Option<String>,
+) -> Result<Channel> {
+    if !prime {
+        return Ok(endpoint.connect_lazy());
+    }
+    let channel = endpoint.clone().connect().await?;
+    let mut client = create_client(channel.clone(), Some(token_provider.clone()), true);
+    client
+        .ping_and_warm(PingAndWarmRequest {
+            name: instance_prefix.clone(),
+            app_profile_id: app_profile_id.unwrap_or_else(|| "".to_owned()),
+        })
+        .await?;
+    Ok(channel)
+}
+
+type ManagedTransport = Buffer<
+    HttpRequest<Body>,
+    Pin<Box<dyn Future<Output = std::result::Result<HttpResponse<Body>, BoxError>> + Send>>,
+>;
+
+type CountPendingChannel = PendingRequests<Channel, CompleteOnResponse>;
+
+type ChannelChange = TowerChange<usize, CountPendingChannel>;
+
+struct ChannelManager {
+    endpoint: Endpoint,
+    token_provider: Arc<dyn TokenProvider>,
+    instance_prefix: String,
+    num_channels: usize,
+    prime_channels: bool,
+    app_profile_id: Option<String>,
+    max_connection_age: Option<Duration>,
+    change_sender: Sender<ChannelChange>,
+}
+
+impl ChannelManager {
+    fn new(
+        endpoint: Endpoint,
+        token_provider: Arc<dyn TokenProvider>,
+        instance_prefix: String,
+        num_channels: usize,
+        prime_channels: bool,
+        app_profile_id: Option<String>,
+        max_connection_age: Option<Duration>,
+        change_sender: Sender<ChannelChange>,
+    ) -> Self {
+        Self {
+            endpoint,
+            token_provider: token_provider.clone(),
+            instance_prefix: instance_prefix.clone(),
+            num_channels: num_channels.max(1),
+            prime_channels,
+            app_profile_id,
+            max_connection_age,
+            change_sender,
+        }
+    }
+
+    async fn seed(&mut self) -> Result<()> {
+        for i in 0..self.num_channels {
+            let channel = create_channel(
+                self.endpoint.clone(),
+                self.prime_channels,
+                self.token_provider.clone(),
+                self.instance_prefix.clone(),
+                self.app_profile_id.clone(),
+            )
+            .await?;
+
+            self.change_sender
+                .try_send(ChannelChange::Insert(
+                    i,
+                    PendingRequests::new(channel, CompleteOnResponse::default()),
+                ))
+                .unwrap();
+        }
+        Ok(())
+    }
+
+    fn spawn_on(mut self, tasks: &mut tokio::task::JoinSet<()>) {
+        tasks.spawn(async move { self.run().await });
+    }
+
+    async fn run(&mut self) {
+        let Some(max_age) = self.max_connection_age else {
+            return;
+        };
+        loop {
+            tokio::time::sleep(max_age).await;
+
+            for i in 0..self.num_channels {
+                let channel = create_channel(
+                    self.endpoint.clone(),
+                    self.prime_channels,
+                    self.token_provider.clone(),
+                    self.instance_prefix.clone(),
+                    self.app_profile_id.clone(),
+                )
+                .await;
+
+                let channel = match channel {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        warn!("Failed to create channel {i}: {e}");
+                        continue;
+                    }
+                };
+
+                if let Err(e) = self.change_sender.try_send(ChannelChange::Insert(
+                    i,
+                    PendingRequests::new(channel, CompleteOnResponse::default()),
+                )) {
+                    warn!("Failed to send channel change {i}: {e}");
+                }
+            }
+        }
+    }
+}
+
+impl BigTableConnection<ManagedTransport> {
+    /// Returns a managed BigTable connection with a background channel manager
+    /// that dynamically scales the number of gRPC channels based on load.
+    pub async fn new_with_managed_transport(
+        project_id: &str,
+        instance_name: &str,
+        is_read_only: bool,
+        channel_size: usize,
+        timeout: Option<Duration>,
+        token_provider: Arc<dyn TokenProvider>,
+        prime_channels: bool,
+        app_profile_id: Option<String>,
+        max_connection_age: Option<Duration>,
+    ) -> Result<Self> {
+        let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
+        let table_prefix = format!("{instance_prefix}/tables/");
+        let endpoint = create_endpoint(timeout)?;
+
+        let (tx, rx) = channel(1024);
+        let stream = ChannelStream::new(rx);
+        let balance = Balance::new(stream);
+        let service = BoxService::new(balance);
+        let (service, worker) = Buffer::pair(service, 1024);
+
+        let mut background_tasks = tokio::task::JoinSet::new();
+        background_tasks.spawn(worker);
+
+        let mut manager = ChannelManager::new(
+            endpoint,
+            token_provider.clone(),
+            instance_prefix.clone(),
+            channel_size,
+            prime_channels,
+            app_profile_id,
+            max_connection_age,
+            tx,
+        );
+        manager.seed().await?;
+        manager.spawn_on(&mut background_tasks);
+
+        Ok(Self {
+            client: create_client(service, Some(token_provider), is_read_only),
+            table_prefix: Arc::new(table_prefix),
+            instance_prefix: Arc::new(instance_prefix),
+            timeout: Arc::new(timeout),
+            _handles: Some(Arc::new(background_tasks)),
+        })
+    }
+}
+
+struct ChannelStream {
+    changes: Receiver<ChannelChange>,
+}
+
+impl ChannelStream {
+    pub(crate) fn new(changes: Receiver<ChannelChange>) -> Self {
+        Self { changes }
+    }
+}
+
+impl Stream for ChannelStream {
+    type Item = Result<ChannelChange>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.changes).poll_recv(cx) {
+            Poll::Pending | Poll::Ready(None) => Poll::Pending,
+            Poll::Ready(Some(change)) => match change {
+                TowerChange::Insert(k, channel) => {
+                    Poll::Ready(Some(Ok(ChannelChange::Insert(k, channel))))
+                }
+                TowerChange::Remove(k) => Poll::Ready(Some(Ok(ChannelChange::Remove(k)))),
+            },
+        }
+    }
+}
+
+impl Unpin for ChannelStream {}
+
+impl<Transport> BigTableConnection<Transport>
+where
+    Transport: Clone,
+{
     /// Create a new BigTable client by cloning needed properties.
     ///
     /// Clients require `&mut self`, due to `Tonic::transport::Channel` limitations, however
     /// the created new clients can be cheaply cloned and thus can be send to different threads
-    pub fn client(&self) -> BigTable {
+    pub fn client(&self) -> BigTable<Transport> {
         BigTable {
             client: self.client.clone(),
             instance_prefix: self.instance_prefix.clone(),
@@ -407,19 +578,24 @@ impl BigTableConnection {
     /// Provide a convenient method to update the inner `BigtableClient` so a newly configured client can be set
     pub fn configure_inner_client(
         &mut self,
-        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
+        config_fn: fn(BigtableClient<AuthSvc<Transport>>) -> BigtableClient<AuthSvc<Transport>>,
     ) {
         self.client = config_fn(self.client.clone());
     }
 }
 
-/// Helper function to create a BigtableClient<AuthSvc>
-/// from a channel.
-fn create_client(
-    channel: Channel,
+/// Helper function to create a BigtableClient<AuthSvc<S>>
+/// from a transport.
+pub(crate) fn create_client<Transport>(
+    transport: Transport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
-) -> BigtableClient<AuthSvc> {
+) -> BigtableClient<AuthSvc<Transport>>
+where
+    Transport: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
+    Transport::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    Transport::Future: Send,
+{
     let scopes = if read_only {
         "https://www.googleapis.com/auth/bigtable.data.readonly"
     } else {
@@ -428,8 +604,8 @@ fn create_client(
 
     let auth_svc = ServiceBuilder::new()
         .layer_fn(|c| AuthSvc::new(c, token_provider.clone(), scopes.to_string()))
-        .service(channel);
-    return BigtableClient::new(auth_svc);
+        .service(transport);
+    BigtableClient::new(auth_svc)
 }
 
 /// The core struct for Bigtable client, which wraps a gPRC client defined by Bigtable proto.
@@ -450,15 +626,46 @@ fn create_client(
 /// }
 /// ```
 #[derive(Clone)]
-pub struct BigTable {
+pub struct BigTable<Transport = Channel> {
     // clone is cheap with Channel, see https://docs.rs/tonic/latest/tonic/transport/struct.Channel.html
-    client: BigtableClient<AuthSvc>,
+    client: BigtableClient<AuthSvc<Transport>>,
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
 }
 
-impl BigTable {
+impl<Transport> BigTable<Transport> {
+    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
+    /// defined from the Bigtable V2 gRPC API
+    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc<Transport>> {
+        &mut self.client
+    }
+
+    /// Provide a convenient method to get full table, which can be used for building requests
+    pub fn get_full_table_name(&self, table_name: &str) -> String {
+        [&self.table_prefix, table_name].concat()
+    }
+}
+
+impl<Transport> BigTable<Transport>
+where
+    Transport: Clone,
+{
+    /// Provide a convenient method to update the inner `BigtableClient` config
+    pub fn configure_inner_client(
+        &mut self,
+        config_fn: fn(BigtableClient<AuthSvc<Transport>>) -> BigtableClient<AuthSvc<Transport>>,
+    ) {
+        self.client = config_fn(self.client.clone());
+    }
+}
+
+impl<Transport> BigTable<Transport>
+where
+    Transport: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
+    Transport::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    Transport::Future: Send,
+{
     /// Wrapped `check_and_mutate_row` method
     pub async fn check_and_mutate_row(
         &mut self,
@@ -567,24 +774,5 @@ impl BigTable {
         );
         let response = self.client.execute_query(tonic_req).await?.into_inner();
         Ok(response)
-    }
-
-    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
-    /// defined from the Bigtable V2 gRPC API
-    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc> {
-        &mut self.client
-    }
-
-    /// Provide a convenient method to update the inner `BigtableClient` config
-    pub fn configure_inner_client(
-        &mut self,
-        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
-    ) {
-        self.client = config_fn(self.client.clone());
-    }
-
-    /// Provide a convenient method to get full table, which can be used for building requests
-    pub fn get_full_table_name(&self, table_name: &str) -> String {
-        [&self.table_prefix, table_name].concat()
     }
 }
