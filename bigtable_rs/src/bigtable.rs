@@ -213,16 +213,18 @@ impl BigTableConnection {
     /// The BIGTABLE_EMULATOR_HOST environment variable is also respected.
     ///
     /// `channel_size` defines the number of connections (or channels) established to Bigtable
-    /// service, and the requests are load balanced onto all the channels. You must therefore
-    /// make sure all of these connections are open when a new request is to be sent.
-    /// Idle connections are automatically closed in "a few minutes". Therefore it is important to
-    /// make sure you have a high enough QPS to send at least one request through all the
-    /// connections (in every service host) every minute. If not, you should consider decreasing the
-    /// channel size. If you are not sure what value to pick and your load is low, just start with 1.
-    /// The recommended value could be 2 x the thread count in your tokio environment see info here
-    /// https://docs.rs/tokio/latest/tokio/attr.main.html, but it might be a very different case for
-    /// different applications.
-    ///
+    /// service, and the requests are load balanced onto all the channels.
+    /// Consult the [Bigtable
+    /// docs](https://docs.cloud.google.com/bigtable/docs/configure-connection-pools) for guidance
+    /// on how to determine the optimal pool size for your application.
+    /// As documented in [Cold starts and low
+    /// QPS](https://docs.cloud.google.com/bigtable/docs/performance#cold-starts), you should
+    /// configure the pool size in a way that ensures all channels receive a steady amount of load
+    /// at all times. Failure to do so could result in latency spikes, as the server closes
+    /// connections after a period of inactivity.
+    /// Another approach to address this is to periodically send a low rate of artificial traffic
+    /// to the table at all times, to ensure no connection becomes idle.
+    /// If you are not sure what value to pick and your load is low, just start with 1.
     pub async fn new(
         project_id: &str,
         instance_name: &str,
@@ -263,6 +265,14 @@ impl BigTableConnection {
     /// Consult the [Bigtable
     /// docs](https://docs.cloud.google.com/bigtable/docs/configure-connection-pools) for guidance
     /// on how to determine the optimal pool size for your application.
+    /// As documented in [Cold starts and low
+    /// QPS](https://docs.cloud.google.com/bigtable/docs/performance#cold-starts), you should
+    /// configure the pool size in a way that ensures all channels receive a steady amount of load
+    /// at all times. Failure to do so could result in latency spikes, as the server closes
+    /// connections after a period of inactivity.
+    /// Another approach to address this is to periodically send a low rate of artificial traffic
+    /// to the table at all times, to ensure no connection becomes idle.
+    /// If you are not sure what value to pick and your load is low, just start with 1.
     pub fn new_with_token_provider(
         project_id: &str,
         instance_name: &str,
