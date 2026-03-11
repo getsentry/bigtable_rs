@@ -217,7 +217,7 @@ pub struct BigTableConnection<Transport = Channel> {
     instance_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
     // When the last clone is dropped, aborts all background tasks (if any).
-    _handles: Option<Arc<tokio::task::JoinSet<()>>>,
+    _task_handles: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTableConnection {
@@ -314,7 +314,7 @@ impl BigTableConnection {
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
-                    _handles: None,
+                    _task_handles: None,
                 })
             }
         }
@@ -387,7 +387,7 @@ impl BigTableConnection {
                 project_id, instance_name
             )),
             timeout: Arc::new(timeout),
-            _handles: None,
+            _task_handles: None,
         })
     }
 }
@@ -586,7 +586,7 @@ impl BigTableConnection<ManagedTransport> {
             table_prefix: Arc::new(table_prefix),
             instance_prefix: Arc::new(instance_prefix),
             timeout: Arc::new(timeout),
-            _handles: Some(Arc::new(background_tasks)),
+            _task_handles: Some(Arc::new(background_tasks)),
         })
     }
 }
