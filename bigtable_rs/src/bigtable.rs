@@ -128,15 +128,14 @@ use crate::google::bigtable::v2::{
     CheckAndMutateRowRequest, CheckAndMutateRowResponse, ExecuteQueryRequest, ExecuteQueryResponse,
     PingAndWarmRequest,
 };
-use crate::Result;
 use crate::{root_ca_certificate, util::get_row_range_from_prefix};
-
-pub use crate::Error;
 
 pub mod read_rows;
 
 /// An alias for Vec<u8> as row key
 type RowKey = Vec<u8>;
+/// A convenient Result type
+type Result<T> = std::result::Result<T, Error>;
 
 /// A data structure for returning the read content of a cell in a row.
 #[derive(Debug)]
@@ -148,13 +147,74 @@ pub struct RowCell {
     pub labels: Vec<String>,
 }
 
+/// Error types the client may have
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("AccessToken error: {0}")]
+    AccessTokenError(String),
+
+    #[error("Certificate error: {0}")]
+    CertificateError(String),
+
+    #[error("I/O Error: {0}")]
+    IoError(std::io::Error),
+
+    #[error("Transport error: {0}")]
+    TransportError(tonic::transport::Error),
+
+    #[error("Chunk error")]
+    ChunkError(String),
+
+    #[error("Row not found")]
+    RowNotFound,
+
+    #[error("Row write failed")]
+    RowWriteFailed,
+
+    #[error("Object not found: {0}")]
+    ObjectNotFound(String),
+
+    #[error("Object is corrupt: {0}")]
+    ObjectCorrupt(String),
+
+    #[error("RPC error: {0}")]
+    RpcError(tonic::Status),
+
+    #[error("Timeout error after {0} seconds")]
+    TimeoutError(u64),
+
+    #[error("GCPAuthError error: {0}")]
+    GCPAuthError(#[from] gcp_auth::Error),
+
+    #[error("Invalid metadata")]
+    MetadataError(tonic::metadata::errors::InvalidMetadataValue),
+}
+
+impl std::convert::From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::IoError(err)
+    }
+}
+
+impl std::convert::From<tonic::transport::Error> for Error {
+    fn from(err: tonic::transport::Error) -> Self {
+        Self::TransportError(err)
+    }
+}
+
+impl std::convert::From<tonic::Status> for Error {
+    fn from(err: tonic::Status) -> Self {
+        Self::RpcError(err)
+    }
+}
+
 /// For initiate a Bigtable connection, then a `Bigtable` client can be made from it.
 #[derive(Clone)]
 pub struct BigTableConnection<Transport = Channel> {
-    pub(crate) client: BigtableClient<AuthSvc<Transport>>,
-    pub(crate) table_prefix: Arc<String>,
-    pub(crate) instance_prefix: Arc<String>,
-    pub(crate) timeout: Arc<Option<Duration>>,
+    client: BigtableClient<AuthSvc<Transport>>,
+    table_prefix: Arc<String>,
+    instance_prefix: Arc<String>,
+    timeout: Arc<Option<Duration>>,
     // When the last clone is dropped, aborts all background tasks (if any).
     _handles: Option<Arc<tokio::task::JoinSet<()>>>,
 }
