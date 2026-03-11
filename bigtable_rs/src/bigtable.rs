@@ -609,7 +609,7 @@ struct ChannelStream {
 }
 
 impl ChannelStream {
-    pub(crate) fn new(changes: Receiver<ChannelChange>) -> Self {
+    pub fn new(changes: Receiver<ChannelChange>) -> Self {
         Self { changes }
     }
 }
@@ -660,7 +660,7 @@ where
 
 /// Helper function to create a BigtableClient<AuthSvc<S>>
 /// from a transport.
-pub(crate) fn create_client<Transport>(
+pub fn create_client<Transport>(
     transport: Transport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
