@@ -646,6 +646,7 @@ where
             instance_prefix: self.instance_prefix.clone(),
             table_prefix: self.table_prefix.clone(),
             timeout: self.timeout.clone(),
+            _task_handles: self._task_handles.clone(),
         }
     }
 
@@ -706,6 +707,9 @@ pub struct BigTable<Transport = Channel> {
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
+    // Arc that holds a reference to the _task_handles from the BigTableConnection this was created
+    // from.
+    _task_handles: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl<Transport> BigTable<Transport> {
