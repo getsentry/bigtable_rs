@@ -99,6 +99,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::{channel, Sender};
@@ -148,7 +149,7 @@ pub struct RowCell {
 }
 
 /// Error types the client may have
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[error("AccessToken error: {0}")]
     AccessTokenError(String),
