@@ -713,25 +713,6 @@ pub struct BigTable {
 }
 
 impl BigTable {
-    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
-    /// defined from the Bigtable V2 gRPC API
-    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc> {
-        &mut self.client
-    }
-
-    /// Provide a convenient method to get full table, which can be used for building requests
-    pub fn get_full_table_name(&self, table_name: &str) -> String {
-        [&self.table_prefix, table_name].concat()
-    }
-
-    /// Provide a convenient method to update the inner `BigtableClient` config
-    pub fn configure_inner_client(
-        &mut self,
-        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
-    ) {
-        self.client = config_fn(self.client.clone());
-    }
-
     /// Wrapped `check_and_mutate_row` method
     pub async fn check_and_mutate_row(
         &mut self,
@@ -840,5 +821,24 @@ impl BigTable {
         );
         let response = self.client.execute_query(tonic_req).await?.into_inner();
         Ok(response)
+    }
+
+    /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
+    /// defined from the Bigtable V2 gRPC API
+    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc> {
+        &mut self.client
+    }
+
+    /// Provide a convenient method to update the inner `BigtableClient` config
+    pub fn configure_inner_client(
+        &mut self,
+        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
+    ) {
+        self.client = config_fn(self.client.clone());
+    }
+
+    /// Provide a convenient method to get full table, which can be used for building requests
+    pub fn get_full_table_name(&self, table_name: &str) -> String {
+        [&self.table_prefix, table_name].concat()
     }
 }
