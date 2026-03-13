@@ -228,7 +228,7 @@ pub struct BigTableConnection {
     instance_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
     // When the last clone is dropped, aborts all background tasks (if any).
-    _task_handles: Option<Arc<tokio::task::JoinSet<()>>>,
+    _bg_tasks: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTableConnection {
@@ -325,7 +325,7 @@ impl BigTableConnection {
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
-                    _task_handles: None,
+                    _bg_tasks: None,
                 })
             }
         }
@@ -398,7 +398,7 @@ impl BigTableConnection {
                 project_id, instance_name
             )),
             timeout: Arc::new(timeout),
-            _task_handles: None,
+            _bg_tasks: None,
         })
     }
 
@@ -451,7 +451,7 @@ impl BigTableConnection {
             table_prefix: Arc::new(table_prefix),
             instance_prefix: Arc::new(instance_prefix),
             timeout: Arc::new(timeout),
-            _task_handles: Some(Arc::new(background_tasks)),
+            _bg_tasks: Some(Arc::new(background_tasks)),
         })
     }
 }
@@ -656,7 +656,7 @@ impl BigTableConnection {
             instance_prefix: self.instance_prefix.clone(),
             table_prefix: self.table_prefix.clone(),
             timeout: self.timeout.clone(),
-            _task_handles: self._task_handles.clone(),
+            _bg_tasks: self._bg_tasks.clone(),
         }
     }
 
@@ -711,9 +711,10 @@ pub struct BigTable {
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
-    // Arc that holds a reference to the _task_handles from the BigTableConnection this was created
-    // from.
-    _task_handles: Option<Arc<tokio::task::JoinSet<()>>>,
+    // Arc that holds a reference to the _bg_tasks from the BigTableConnection this was created from.
+    // This is needed as we want to keep the tasks alive even if the user drops the BigTableConnection
+    // this BigTable instance originated from.
+    _bg_tasks: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTable {
