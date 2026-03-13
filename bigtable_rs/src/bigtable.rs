@@ -433,7 +433,7 @@ impl BigTableConnection {
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
 
-        let manager = ChannelManager::new(
+        let mut manager = ChannelManager::new(
             endpoint,
             token_provider.clone(),
             instance_prefix.clone(),
@@ -444,7 +444,7 @@ impl BigTableConnection {
             tx,
         );
         manager.seed().await?;
-        manager.spawn_on(&mut background_tasks);
+        background_tasks.spawn(async move { manager.run().await });
 
         Ok(Self {
             client: create_client(box_transport(service), Some(token_provider), is_read_only),
@@ -563,10 +563,6 @@ impl ChannelManager {
                 .unwrap();
         }
         Ok(())
-    }
-
-    fn spawn_on(mut self, tasks: &mut tokio::task::JoinSet<()>) {
-        tasks.spawn(async move { self.run().await });
     }
 
     // Pre-emptively refreshes channels every `max_connection_age`, optionally priming them.
