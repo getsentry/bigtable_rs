@@ -407,7 +407,7 @@ impl BigTableConnection {
     /// The manager task is responsible for:
     /// - Optionally pre-emptively refreshing channels every `max_connection_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
-    /// refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
+    ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
