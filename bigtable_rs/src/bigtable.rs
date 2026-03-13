@@ -422,10 +422,11 @@ impl BigTableConnection {
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
         let table_prefix = format!("{instance_prefix}/tables/");
         let endpoint = create_endpoint(timeout)?;
+        let num_channels = num_channels.max(1);
 
         // Analogous to what `tonic::transport::channel::Channel::balance_channel` constructs
         // internally.
-        let (tx, rx) = channel(1024);
+        let (tx, rx) = channel(num_channels);
         let stream = ChannelStream::new(rx);
         let balance = Balance::new(stream);
         let (service, worker) = Buffer::pair(balance, 1024);
