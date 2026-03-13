@@ -86,7 +86,6 @@
 //! }
 //! ```
 
-use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,10 +112,10 @@ use tonic::{
     transport::{Channel, ClientTlsConfig},
     Response,
 };
-use tower::discover::Change as TowerChange;
 use tower::load::{CompleteOnResponse, PendingRequests};
-use tower::util::BoxService;
+use tower::util::ServiceExt;
 use tower::{balance::p2c::Balance, buffer::Buffer};
+use tower::{discover::Change as TowerChange, util::BoxCloneSyncService};
 use tower::{BoxError, Service, ServiceBuilder};
 
 use crate::auth_service::AuthSvc;
@@ -209,10 +208,22 @@ impl std::convert::From<tonic::Status> for Error {
     }
 }
 
+/// The underlying `tower::Service` used to dispatch HTTP requests.
+pub(crate) type BoxTransport = BoxCloneSyncService<HttpRequest<Body>, HttpResponse<Body>, BoxError>;
+
+fn box_transport<T>(transport: T) -> BoxTransport
+where
+    T: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + Sync + 'static,
+    T::Error: Into<BoxError>,
+    T::Future: Send + 'static,
+{
+    BoxTransport::new(transport.map_err(Into::into))
+}
+
 /// For initiate a Bigtable connection, then a `Bigtable` client can be made from it.
 #[derive(Clone)]
-pub struct BigTableConnection<Transport = Channel> {
-    client: BigtableClient<AuthSvc<Transport>>,
+pub struct BigTableConnection {
+    client: BigtableClient<AuthSvc>,
     table_prefix: Arc<String>,
     instance_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
@@ -310,7 +321,7 @@ impl BigTableConnection {
 
                 let token_provider = Some(token_provider);
                 Ok(Self {
-                    client: create_client(channel, token_provider, is_read_only),
+                    client: create_client(box_transport(channel), token_provider, is_read_only),
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
@@ -377,7 +388,7 @@ impl BigTableConnection {
         };
 
         Ok(Self {
-            client: create_client(channel, None, is_read_only),
+            client: create_client(box_transport(channel), None, is_read_only),
             table_prefix: Arc::new(format!(
                 "projects/{}/instances/{}/tables/",
                 project_id, instance_name
@@ -427,7 +438,11 @@ async fn create_channel(
         return Ok(endpoint.connect_lazy());
     }
     let channel = endpoint.clone().connect().await?;
-    let mut client = create_client(channel.clone(), Some(token_provider.clone()), true);
+    let mut client = create_client(
+        box_transport(channel.clone()),
+        Some(token_provider.clone()),
+        true,
+    );
     client
         .ping_and_warm(PingAndWarmRequest {
             name: instance_prefix.clone(),
@@ -436,11 +451,6 @@ async fn create_channel(
         .await?;
     Ok(channel)
 }
-
-type ManagedTransport = Buffer<
-    HttpRequest<Body>,
-    Pin<Box<dyn Future<Output = std::result::Result<HttpResponse<Body>, BoxError>> + Send>>,
->;
 
 type CountPendingChannel = PendingRequests<Channel, CompleteOnResponse>;
 
@@ -549,7 +559,7 @@ impl ChannelManager {
     }
 }
 
-impl BigTableConnection<ManagedTransport> {
+impl BigTableConnection {
     /// Returns a managed BigTable connection with a background channel manager
     /// that pre-emptively refreshes channels every `max_connection_age`, optionally priming them
     /// with [`PingAndWarmRequest`].
@@ -573,8 +583,7 @@ impl BigTableConnection<ManagedTransport> {
         let (tx, rx) = channel(1024);
         let stream = ChannelStream::new(rx);
         let balance = Balance::new(stream);
-        let service = BoxService::new(balance);
-        let (service, worker) = Buffer::pair(service, 1024);
+        let (service, worker) = Buffer::pair(balance, 1024);
 
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
@@ -593,7 +602,7 @@ impl BigTableConnection<ManagedTransport> {
         manager.spawn_on(&mut background_tasks);
 
         Ok(Self {
-            client: create_client(service, Some(token_provider), is_read_only),
+            client: create_client(box_transport(service), Some(token_provider), is_read_only),
             table_prefix: Arc::new(table_prefix),
             instance_prefix: Arc::new(instance_prefix),
             timeout: Arc::new(timeout),
@@ -632,15 +641,12 @@ impl Stream for ChannelStream {
 
 impl Unpin for ChannelStream {}
 
-impl<Transport> BigTableConnection<Transport>
-where
-    Transport: Clone,
-{
+impl BigTableConnection {
     /// Create a new BigTable client by cloning needed properties.
     ///
     /// Clients require `&mut self`, due to `Tonic::transport::Channel` limitations, however
     /// the created new clients can be cheaply cloned and thus can be send to different threads
-    pub fn client(&self) -> BigTable<Transport> {
+    pub fn client(&self) -> BigTable {
         BigTable {
             client: self.client.clone(),
             instance_prefix: self.instance_prefix.clone(),
@@ -653,24 +659,18 @@ where
     /// Provide a convenient method to update the inner `BigtableClient` so a newly configured client can be set
     pub fn configure_inner_client(
         &mut self,
-        config_fn: fn(BigtableClient<AuthSvc<Transport>>) -> BigtableClient<AuthSvc<Transport>>,
+        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
     ) {
         self.client = config_fn(self.client.clone());
     }
 }
 
-/// Helper function to create a BigtableClient<AuthSvc<Transport>>
-/// from a transport.
-fn create_client<Transport>(
-    transport: Transport,
+/// Helper function to create a BigtableClient<AuthSvc> from a transport.
+fn create_client(
+    transport: BoxTransport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
-) -> BigtableClient<AuthSvc<Transport>>
-where
-    Transport: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
-    Transport::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    Transport::Future: Send,
-{
+) -> BigtableClient<AuthSvc> {
     let scopes = if read_only {
         "https://www.googleapis.com/auth/bigtable.data.readonly"
     } else {
@@ -701,9 +701,9 @@ where
 /// }
 /// ```
 #[derive(Clone)]
-pub struct BigTable<Transport = Channel> {
+pub struct BigTable {
     // clone is cheap with Channel, see https://docs.rs/tonic/latest/tonic/transport/struct.Channel.html
-    client: BigtableClient<AuthSvc<Transport>>,
+    client: BigtableClient<AuthSvc>,
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
@@ -712,10 +712,10 @@ pub struct BigTable<Transport = Channel> {
     _task_handles: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
-impl<Transport> BigTable<Transport> {
+impl BigTable {
     /// Provide a convenient method to get the inner `BigtableClient` so user can use any methods
     /// defined from the Bigtable V2 gRPC API
-    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc<Transport>> {
+    pub fn get_client(&mut self) -> &mut BigtableClient<AuthSvc> {
         &mut self.client
     }
 
@@ -723,27 +723,15 @@ impl<Transport> BigTable<Transport> {
     pub fn get_full_table_name(&self, table_name: &str) -> String {
         [&self.table_prefix, table_name].concat()
     }
-}
 
-impl<Transport> BigTable<Transport>
-where
-    Transport: Clone,
-{
     /// Provide a convenient method to update the inner `BigtableClient` config
     pub fn configure_inner_client(
         &mut self,
-        config_fn: fn(BigtableClient<AuthSvc<Transport>>) -> BigtableClient<AuthSvc<Transport>>,
+        config_fn: fn(BigtableClient<AuthSvc>) -> BigtableClient<AuthSvc>,
     ) {
         self.client = config_fn(self.client.clone());
     }
-}
 
-impl<Transport> BigTable<Transport>
-where
-    Transport: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + 'static,
-    Transport::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    Transport::Future: Send,
-{
     /// Wrapped `check_and_mutate_row` method
     pub async fn check_and_mutate_row(
         &mut self,

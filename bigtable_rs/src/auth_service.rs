@@ -7,18 +7,20 @@ use gcp_auth::TokenProvider;
 use http::{HeaderValue, Request, Response};
 use log::debug;
 use tonic::body::Body;
-use tower::Service;
+use tower::{BoxError, Service};
+
+use crate::bigtable::BoxTransport;
 
 #[derive(Clone)]
-pub struct AuthSvc<Transport = tonic::transport::Channel> {
-    inner: Transport,
+pub struct AuthSvc {
+    inner: BoxTransport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     scopes: String,
 }
 
-impl<Transport> AuthSvc<Transport> {
+impl AuthSvc {
     pub fn new(
-        inner: Transport,
+        inner: BoxTransport,
         authentication_manager: Option<Arc<dyn TokenProvider>>,
         scopes: String,
     ) -> Self {
@@ -30,19 +32,14 @@ impl<Transport> AuthSvc<Transport> {
     }
 }
 
-impl<Transport> Service<Request<Body>> for AuthSvc<Transport>
-where
-    Transport: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
-    Transport::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    Transport::Future: Send,
-{
+impl Service<Request<Body>> for AuthSvc {
     type Response = Response<Body>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Error = BoxError;
     #[allow(clippy::type_complexity)]
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
@@ -61,7 +58,7 @@ where
             return match token_f_opt {
                 None => {
                     debug!("auth intercepting and not attaching token");
-                    let response = inner.call(request).await.map_err(Into::into)?;
+                    let response = inner.call(request).await?;
                     Ok(response)
                 }
                 Some(token_future) => {
@@ -76,7 +73,7 @@ where
                         std::str::from_utf8(&token.as_bytes()[..5]).unwrap_or("")
                     );
                     request.headers_mut().insert("authorization", bearer_header);
-                    let response = inner.call(request).await.map_err(Into::into)?;
+                    let response = inner.call(request).await?;
                     Ok(response)
                 }
             };
