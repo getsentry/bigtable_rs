@@ -557,6 +557,7 @@ impl ChannelManager {
             .await?;
             let channel = PendingRequests::new(channel, CompleteOnResponse::default());
 
+            // Will never error unless the channel is closed
             self.change_sender
                 .send(ChannelChange::Insert(i, channel))
                 .await
