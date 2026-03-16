@@ -220,6 +220,31 @@ where
     BoxTransport::new(transport.map_err(Into::into))
 }
 
+/// A wrapper around a `Service` that holds background tasks alive via an `Arc<JoinSet>`.
+/// When the last clone is dropped, all background tasks are aborted.
+#[derive(Clone)]
+struct ManagedTransport<T> {
+    inner: T,
+    _bg_tasks: Arc<tokio::task::JoinSet<()>>,
+}
+
+impl<T, Req> Service<Req> for ManagedTransport<T>
+where
+    T: Service<Req>,
+{
+    type Response = T::Response;
+    type Error = T::Error;
+    type Future = T::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Req) -> Self::Future {
+        self.inner.call(req)
+    }
+}
+
 /// For initiate a Bigtable connection, then a `Bigtable` client can be made from it.
 #[derive(Clone)]
 pub struct BigTableConnection {
@@ -227,8 +252,6 @@ pub struct BigTableConnection {
     table_prefix: Arc<String>,
     instance_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
-    // When the last clone is dropped, aborts all background tasks (if any).
-    _bg_tasks: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTableConnection {
@@ -325,7 +348,6 @@ impl BigTableConnection {
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
-                    _bg_tasks: None,
                 })
             }
         }
@@ -398,7 +420,6 @@ impl BigTableConnection {
                 project_id, instance_name
             )),
             timeout: Arc::new(timeout),
-            _bg_tasks: None,
         })
     }
 
@@ -447,12 +468,16 @@ impl BigTableConnection {
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
 
+        let transport = ManagedTransport {
+            inner: service,
+            _bg_tasks: Arc::new(background_tasks),
+        };
+
         Ok(Self {
-            client: create_client(box_transport(service), Some(token_provider), is_read_only),
+            client: create_client(box_transport(transport), Some(token_provider), is_read_only),
             table_prefix: Arc::new(table_prefix),
             instance_prefix: Arc::new(instance_prefix),
             timeout: Arc::new(timeout),
-            _bg_tasks: Some(Arc::new(background_tasks)),
         })
     }
 }
@@ -653,7 +678,6 @@ impl BigTableConnection {
             instance_prefix: self.instance_prefix.clone(),
             table_prefix: self.table_prefix.clone(),
             timeout: self.timeout.clone(),
-            _bg_tasks: self._bg_tasks.clone(),
         }
     }
 
@@ -708,10 +732,6 @@ pub struct BigTable {
     instance_prefix: Arc<String>,
     table_prefix: Arc<String>,
     timeout: Arc<Option<Duration>>,
-    // Arc that holds a reference to the _bg_tasks from the BigTableConnection this was created from.
-    // This is needed as we want to keep the tasks alive even if the user drops the BigTableConnection
-    // this BigTable instance originated from.
-    _bg_tasks: Option<Arc<tokio::task::JoinSet<()>>>,
 }
 
 impl BigTable {
