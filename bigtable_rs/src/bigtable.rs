@@ -635,8 +635,6 @@ impl ChannelManager {
     }
 }
 
-impl BigTableConnection {}
-
 // Analogous to `tonic::transport::channel::service::discover::DynamicServiceStream`, which `tonic`
 // itself doesn't expose.
 struct ChannelStream {
