@@ -555,13 +555,12 @@ impl ChannelManager {
                 self.app_profile_id.clone(),
             )
             .await?;
+            let channel = PendingRequests::new(channel, CompleteOnResponse::default());
 
             self.change_sender
-                .try_send(ChannelChange::Insert(
-                    i,
-                    PendingRequests::new(channel, CompleteOnResponse::default()),
-                ))
-                .unwrap();
+                .send(ChannelChange::Insert(i, channel))
+                .await
+                .ok();
         }
         Ok(())
     }
