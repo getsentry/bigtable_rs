@@ -88,21 +88,21 @@ pub async fn create_channel(
 /// Builder for creating a `BoxTransport` backed by a managed channel pool.
 pub struct ManagedTransportBuilder {
     endpoint: Endpoint,
+    instance_prefix: String,
     num_channels: usize,
     token_provider: Option<Arc<dyn TokenProvider>>,
-    instance_prefix: Option<String>,
     prime_channels: bool,
     app_profile_id: Option<String>,
     max_channel_age: Option<Duration>,
 }
 
 impl ManagedTransportBuilder {
-    pub fn new(endpoint: Endpoint) -> Self {
+    pub fn new(endpoint: Endpoint, instance_prefix: String) -> Self {
         Self {
             endpoint,
+            instance_prefix,
             num_channels: 1,
             token_provider: None,
-            instance_prefix: None,
             prime_channels: false,
             app_profile_id: None,
             max_channel_age: None,
@@ -116,11 +116,6 @@ impl ManagedTransportBuilder {
 
     pub fn token_provider(mut self, tp: Arc<dyn TokenProvider>) -> Self {
         self.token_provider = Some(tp);
-        self
-    }
-
-    pub fn instance_prefix(mut self, prefix: String) -> Self {
-        self.instance_prefix = Some(prefix);
         self
     }
 
@@ -143,7 +138,7 @@ impl ManagedTransportBuilder {
         let num_channels = self.num_channels.max(1);
 
         // If we don't need priming or refresh, use tonic's built-in balance_channel
-        // which is simpler and doesn't require a token_provider or instance_prefix.
+        // which is simpler and doesn't require a token_provider.
         if !self.prime_channels && self.max_channel_age.is_none() {
             let (channel, tx) = Channel::balance_channel(1024);
             for i in 0..num_channels {
@@ -153,13 +148,12 @@ impl ManagedTransportBuilder {
             return Ok(box_transport(channel));
         }
 
-        // Full managed path: requires token_provider and instance_prefix for priming/refresh.
-        let token_provider = self
-            .token_provider
-            .expect("token_provider is required when prime_channels or max_channel_age is set");
-        let instance_prefix = self
-            .instance_prefix
-            .expect("instance_prefix is required when prime_channels or max_channel_age is set");
+        // Full managed path: requires token_provider for priming/refresh.
+        // Fall back to the default provider if the caller didn't supply one.
+        let token_provider = match self.token_provider {
+            Some(tp) => tp,
+            None => gcp_auth::provider().await?,
+        };
 
         let (tx, rx) = channel(num_channels);
         let stream = ChannelStream::new(rx);
@@ -172,7 +166,7 @@ impl ManagedTransportBuilder {
         let mut manager = ChannelManager::new(
             self.endpoint,
             token_provider,
-            instance_prefix,
+            self.instance_prefix,
             num_channels,
             self.prime_channels,
             self.app_profile_id,
