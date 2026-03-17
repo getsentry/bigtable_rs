@@ -11,6 +11,7 @@ mod auth_service;
 pub mod bigtable;
 pub mod google;
 mod root_ca_certificate;
+pub mod transport;
 pub mod util;
 
 #[cfg(test)]

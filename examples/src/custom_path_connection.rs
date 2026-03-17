@@ -32,7 +32,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         channel_size,
         Some(timeout),
         Arc::new(CustomServiceAccount::from_file(json_path).unwrap()),
-    )?;
+    )
+    .await?;
     let mut bigtable = connection.client();
 
     let request = MutateRowRequest {

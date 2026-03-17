@@ -9,7 +9,7 @@ use log::debug;
 use tonic::body::Body;
 use tower::Service;
 
-use crate::bigtable::BoxTransport;
+use crate::transport::BoxTransport;
 
 #[derive(Clone)]
 pub struct AuthSvc {

@@ -24,7 +24,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         channel_size,
         Some(timeout),
         Arc::new(CustomServiceAccount::from_file(json_path).unwrap()),
-    )?;
+    )
+    .await?;
 
     // update the config for the inner client of the connection
     connection
