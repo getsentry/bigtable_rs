@@ -98,11 +98,7 @@ use tokio::net::UnixStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Endpoint;
 use tonic::IntoRequest;
-use tonic::{
-    codec::Streaming,
-    transport::Channel,
-    Response,
-};
+use tonic::{codec::Streaming, transport::Channel, Response};
 use tower::ServiceBuilder;
 
 use crate::auth_service::AuthSvc;
@@ -114,7 +110,7 @@ use crate::google::bigtable::v2::{
 use crate::google::bigtable::v2::{
     CheckAndMutateRowRequest, CheckAndMutateRowResponse, ExecuteQueryRequest, ExecuteQueryResponse,
 };
-use crate::transport::{box_transport, BoxTransport, ManagedTransportBuilder, create_endpoint};
+use crate::transport::{box_transport, create_endpoint, BoxTransport, ManagedTransportBuilder};
 use crate::util::get_row_range_from_prefix;
 
 pub mod read_rows;
@@ -232,14 +228,16 @@ impl BigTableConnection {
         timeout: Option<Duration>,
     ) -> Result<Self> {
         match std::env::var("BIGTABLE_EMULATOR_HOST") {
-            Ok(endpoint) => Self::new_with_emulator(
-                endpoint.as_str(),
-                project_id,
-                instance_name,
-                is_read_only,
-                timeout,
-            )
-            .await,
+            Ok(endpoint) => {
+                Self::new_with_emulator(
+                    endpoint.as_str(),
+                    project_id,
+                    instance_name,
+                    is_read_only,
+                    timeout,
+                )
+                .await
+            }
 
             Err(_) => {
                 let token_provider = gcp_auth::provider().await?;
@@ -276,14 +274,16 @@ impl BigTableConnection {
         token_provider: Arc<dyn TokenProvider>,
     ) -> Result<Self> {
         match std::env::var("BIGTABLE_EMULATOR_HOST") {
-            Ok(endpoint) => Self::new_with_emulator(
-                endpoint.as_str(),
-                project_id,
-                instance_name,
-                is_read_only,
-                timeout,
-            )
-            .await,
+            Ok(endpoint) => {
+                Self::new_with_emulator(
+                    endpoint.as_str(),
+                    project_id,
+                    instance_name,
+                    is_read_only,
+                    timeout,
+                )
+                .await
+            }
 
             Err(_) => {
                 let endpoint = create_endpoint(timeout)?;
@@ -356,9 +356,7 @@ impl BigTableConnection {
                 .expect("invalid connection emulator uri");
             let endpoint = configure_endpoint(endpoint, timeout);
 
-            ManagedTransportBuilder::new(endpoint)
-                .build()
-                .await?
+            ManagedTransportBuilder::new(endpoint).build().await?
         };
 
         Ok(Self::new_with_transport(
