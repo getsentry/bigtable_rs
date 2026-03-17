@@ -287,8 +287,7 @@ impl BigTableConnection {
 
             Err(_) => {
                 let endpoint = create_endpoint(timeout)?;
-                let instance_prefix =
-                    format!("projects/{project_id}/instances/{instance_name}");
+                let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
                 let transport = ManagedTransportBuilder::new(endpoint, instance_prefix)
                     .num_channels(channel_size)
                     .build()
@@ -358,8 +357,7 @@ impl BigTableConnection {
                 .expect("invalid connection emulator uri");
             let endpoint = configure_endpoint(endpoint, timeout);
 
-            let instance_prefix =
-                format!("projects/{project_id}/instances/{instance_name}");
+            let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
             ManagedTransportBuilder::new(endpoint, instance_prefix)
                 .build()
                 .await?
