@@ -627,7 +627,7 @@ impl ChannelManager {
                 })
                 .await
             {
-                warn!("Failed to drive Discover queue with PingAndWarm: {e}");
+                warn!("Failed to force drain ChannelStream with PingAndWarm: {e}");
             }
 
             tokio::time::sleep(max_age).await;
