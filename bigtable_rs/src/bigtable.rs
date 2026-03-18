@@ -451,6 +451,11 @@ impl BigTableConnection {
         let stream = ChannelStream::new(rx);
         let balance = Balance::new(stream);
         let (service, worker) = Buffer::pair(balance, 1024);
+        let client = create_client(
+            box_transport(service.clone()),
+            Some(token_provider.clone()),
+            true,
+        );
 
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
@@ -464,6 +469,7 @@ impl BigTableConnection {
             app_profile_id,
             max_channel_age,
             tx,
+            client,
         );
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
@@ -544,6 +550,7 @@ struct ChannelManager {
     app_profile_id: Option<String>,
     max_connection_age: Option<Duration>,
     change_sender: Sender<ChannelChange>,
+    client: BigtableClient<AuthSvc>,
 }
 
 impl ChannelManager {
@@ -556,6 +563,7 @@ impl ChannelManager {
         app_profile_id: Option<String>,
         max_connection_age: Option<Duration>,
         change_sender: Sender<ChannelChange>,
+        client: BigtableClient<AuthSvc>,
     ) -> Self {
         Self {
             endpoint,
@@ -566,6 +574,7 @@ impl ChannelManager {
             app_profile_id,
             max_connection_age,
             change_sender,
+            client,
         }
     }
 
@@ -603,6 +612,24 @@ impl ChannelManager {
             return;
         };
         loop {
+            // `Balance` only drains `ChannelStream` when polled through an actual request.
+            // If the user doesn't run any request through the transport we're managing for the next
+            // `max_age`, then `ChannelStream` won't be polled, and the next time we run this
+            // loop (or the first time after calling `self.seed`), then `self.change_sender` will
+            // attempt to send on a full channel.
+            // To work around that, we send a request through `self.client`, which shares the same
+            // underlying `Balance`, forcing it to drain the `ChannelChange`s we just inserted.
+            if let Err(e) = self
+                .client
+                .ping_and_warm(PingAndWarmRequest {
+                    name: self.instance_prefix.clone(),
+                    app_profile_id: self.app_profile_id.clone().unwrap_or_default(),
+                })
+                .await
+            {
+                warn!("Failed to force drain ChannelStream with PingAndWarm: {e}");
+            }
+
             tokio::time::sleep(max_age).await;
             debug!("Refreshing {} channels", self.num_channels);
 
@@ -631,6 +658,7 @@ impl ChannelManager {
                     warn!("Failed to send channel change {i}: {e}");
                 }
             }
+            debug!("Refreshed {} channels", self.num_channels);
         }
     }
 }
