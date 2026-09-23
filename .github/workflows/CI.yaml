@@ -2,13 +2,12 @@ name: bigtable_rs CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
 
 permissions:
+  pull-requests: write
   contents: read
 
 concurrency:
@@ -17,70 +16,131 @@ concurrency:
 
 jobs:
   test:
+    name: Build and Test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, macOS-latest ] # todo: support windows-latest after knowing how to solve openssl issues
+        os: [ ubuntu-latest ] # macOS-latest is ignored for now as there is no docker on it, also we might not really need to verify on mac
 
     steps:
-      # cache cargo build
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-      - name: Cache cargo index
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-      - name: Cache cargo binaries
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-${{ hashFiles('**/Cargo.lock') }}
-      - name: Cache cargo build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-      # rust build
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: 'rustfmt, llvm-tools-preview'
+      - name: Start Bigtable Emulator
+        run: |
+          docker run --rm -d -p 8086:8086 --name bigtable-emulator \
+          google/cloud-sdk:latest \
+          gcloud beta emulators bigtable start --host-port=0.0.0.0:8086
+
       - name: Checkout repository
-        uses: actions/checkout@master
+        uses: actions/checkout@v6
         with:
           submodules: 'true'
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          components: rustfmt, llvm-tools-preview
+          # This action automatically handles caching for ~/.cargo and ./target
+
+      - name: Install Tools (Protoc & cargo-llvm-cov)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc, cargo-llvm-cov
+
       - name: Check fmt
         run: cargo fmt -- --check
+      
       - name: Cargo build
         run: cargo build
         env:
           BUILD_BIGTABLE_RS_GOOGLE_PROTO: 'true'
+      
       - name: Check git status clean
         uses: CatChen/check-git-status-action@v1
         with:
-          fail-if-not-clean: true # optional
-          push-if-not-clean: false # optional
-          request-changes-if-not-clean: false # optional
-      - name: Run tests
-        run: cargo test --verbose
+          fail-if-not-clean: true
+
+      - name: Generate Code Coverage
+        # This  both 'Run tests'
+        # --lcov: generates the file for Codecov
+        # --ignore-filename-regex: excludes your google/ folder
         env:
-          CARGO_INCREMENTAL: '0'
-          RUSTFLAGS: '-Cinstrument-coverage'
-          RUSTDOCFLAGS: '-Cinstrument-coverage'
-      - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
-      - name: Run grcov
-        run: grcov . --binary-path target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../**' --ignore '/*' --ignore 'bigtable_rs/src/google/*' --keep-only 'bigtable_rs/src/*' -o coverage.lcov
+          BIGTABLE_EMULATOR_HOST: localhost:8086
+
+        # Use cargo llvm-cov to run test and generate coverage report
+        # For local running, use command:
+        # BIGTABLE_EMULATOR_HOST=localhost:8086 cargo llvm-cov --no-cfg-coverage  --ignore-filename-regex "google/" --features integration_tests --html --open
+        run: >
+          cargo llvm-cov --no-cfg-coverage --lcov --output-path lcov.info
+          --ignore-filename-regex "google/" --features integration_tests
+
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
-          files: ./coverage.lcov
+          files: ./lcov.info
           flags: rust
-          fail_ci_if_error: false # optional (default = false)
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      
+      - name: Emulator Logs on Failure
+        if: failure() # Only runs if the tests (or setup) fail
+        run: docker logs bigtable-emulator
+
+
+  # Release unpublished packages.
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    needs: test # <--- CRITICAL: release-plz-release won't start until 'test' passes
+    if: |
+      github.repository_owner == 'liufuyang' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write # Required for Trusted Publishing
+    steps:
+      - &checkout
+        name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
+      - &install-rust
+        name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Create a PR with the new versions and changelog, preparing the next release.
+  release-plz-pr:
+    name: Release-plz creating PR
+    runs-on: ubuntu-latest
+    if: |
+      github.repository_owner == 'liufuyang' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - *checkout
+      - *install-rust
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      

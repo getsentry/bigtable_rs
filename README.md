@@ -4,9 +4,10 @@ A simple Rust library for working
 with [Google Bigtable](https://cloud.google.com/bigtable/docs/) [Data API V2](https://cloud.google.com/bigtable/docs/reference/data/rpc/google.bigtable.v2)
 .
 
-![ci_badge](https://github.com/liufuyang/bigtable_rs/workflows/bigtable_rs%20CI/badge.svg)
+[![ci_badge](https://github.com/liufuyang/bigtable_rs/actions/workflows/CI.yaml/badge.svg)](https://github.com/liufuyang/bigtable_rs/actions/workflows/CI.yaml)
 [![Crates.io](https://img.shields.io/crates/v/bigtable_rs)](https://crates.io/crates/bigtable_rs)
 [![Documentation](https://docs.rs/bigtable_rs/badge.svg)](https://docs.rs/bigtable_rs)
+[![codecov](https://codecov.io/github/liufuyang/bigtable_rs/graph/badge.svg?token=U9LTK0V10S)](https://codecov.io/github/liufuyang/bigtable_rs)
 [![Crates.io](https://img.shields.io/crates/l/bigtable_rs)](LICENSE)
 
 ## Disclaimer - might be ready for production use
@@ -44,12 +45,12 @@ again.
 
 The returned row values from Bigtable is parsed by this library.
 
-Supported interfaces towards Bigtable:
+See more examples on how to use:
 
-* [ReadRows](https://github.com/googleapis/googleapis/blob/master/google/bigtable/v2/bigtable.proto#L55)
-* [SampleRowKeys](https://github.com/googleapis/googleapis/blob/master/google/bigtable/v2/bigtable.proto#L68)
-* [MutateRow](https://github.com/googleapis/googleapis/blob/master/google/bigtable/v2/bigtable.proto#L78)
-* [MutateRows](https://github.com/googleapis/googleapis/blob/master/google/bigtable/v2/bigtable.proto#L90)
+* [ReadRows](examples/src/simple_read.rs)
+* [MutateRows](examples/src/simple_write.rs)
+* [SampleRowKeys](examples/src/sample_row_keys.rs)
+* [Read with a prefix](examples/src/prefix.rs)
 
 For other gRPC APIs/methods, one should be able to use the gRCP client directly and assemble any
 customized request you
@@ -66,12 +67,17 @@ supports:
   (by setting `GOOGLE_APPLICATION_CREDENTIALS=path/to/key.json` environment parameter)
 * Default service account by retrieving a token from the gcloud metadata server
 
+Depends on [googleapis_tonic_google_bigtable_v2](https://crates.io/crates/googleapis_tonic_google_bigtable_v2) - which is a crate
+contains all the Bigtable Rust types generated from
+googleapis Bigtable protos by using tonic build.
+
 You can use the library as follows:
 
 ```toml
 [dependencies]
-bigtable_rs = "0.2.19"
+bigtable_rs = "0.4.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
+googleapis_tonic_google_bigtable_v2 = "0.36.0"
 env_logger = "0.11.1"
 ```
 
@@ -81,9 +87,9 @@ range scan
 
 ```rust
 use bigtable_rs::bigtable;
-use bigtable_rs::google::bigtable::v2::row_filter::{Chain, Filter};
-use bigtable_rs::google::bigtable::v2::row_range::{EndKey, StartKey};
-use bigtable_rs::google::bigtable::v2::{ReadRowsRequest, RowFilter, RowRange, RowSet};
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::{Chain, Filter};
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_range::{EndKey, StartKey};
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{ReadRowsRequest, RowFilter, RowRange, RowSet};
 use env_logger;
 use std::error::Error;
 use std::time::Duration;
@@ -222,14 +228,21 @@ Running tests:
 
 ```
 cargo test -- --nocapture
+
+# Or run with integration tests (requires a bigtable emulator running)
+
+BIGTABLE_EMULATOR_HOST=localhost:8086 cargo test --features integration_tests
 ```
+
+See code coverage:
 
 ```
 rustup component add llvm-tools-preview
-cargo install grcov
-mkdir -p target/coverage/html
+cargo install cargo-llvm-cov
 
-CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' RUSTDOCFLAGS='-Cinstrument-coverage' cargo test
+cargo llvm-cov --no-cfg-coverage  --ignore-filename-regex "google/" --html --open
 
-grcov . --binary-path ./target/debug/deps/ -s . -t html --branch --ignore-not-existing --ignore '../*' --ignore "/*" --ignore "bigtable_rs/src/google/*" --keep-only "bigtable_rs/src/*" -o target/coverage/html
+# Or run with integration test (requires a bigtable emulator running)
+
+BIGTABLE_EMULATOR_HOST=localhost:8086 cargo llvm-cov --no-cfg-coverage  --ignore-filename-regex "google/" --features integration_tests --html --open
 ```
