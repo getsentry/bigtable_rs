@@ -183,9 +183,6 @@ pub enum Error {
     #[error("Timeout error after {0} seconds")]
     TimeoutError(u64),
 
-    #[error("PingAndWarm rate of {0} requests per second exceeds timer resolution")]
-    InvalidPingAndWarmRate(u32),
-
     #[error("GCPAuthError error: {0}")]
     GCPAuthError(#[from] gcp_auth::Error),
 
@@ -229,36 +226,6 @@ where
 struct ManagedTransport<T> {
     inner: T,
     _bg_tasks: Arc<tokio::task::JoinSet<()>>,
-}
-
-/// Settings for a managed Bigtable transport.
-#[derive(Clone, Debug)]
-pub struct ManagedTransportConfig {
-    /// Number of channels in the pool. Defaults to one.
-    pub num_channels: usize,
-    /// Whether to prime channels with `PingAndWarm` at creation. Defaults to true.
-    pub prime_channels: bool,
-    /// Application profile for `PingAndWarm`. `None` uses the default profile.
-    pub app_profile_id: Option<String>,
-    /// Maximum channel age before a background refresh. `None` disables refresh.
-    pub max_channel_age: Option<Duration>,
-    /// Background `PingAndWarm` requests per second across the channel pool.
-    ///
-    /// Requests use the balanced transport, so they are not guaranteed to visit every channel.
-    /// The default, `0`, disables periodic requests. Channel priming and refresh still run.
-    pub ping_and_warm_rps: u32,
-}
-
-impl Default for ManagedTransportConfig {
-    fn default() -> Self {
-        Self {
-            num_channels: 1,
-            prime_channels: true,
-            app_profile_id: None,
-            max_channel_age: None,
-            ping_and_warm_rps: 0,
-        }
-    }
 }
 
 impl<T, Req> Service<Req> for ManagedTransport<T>
@@ -464,8 +431,9 @@ impl BigTableConnection {
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
     ///
-    /// Periodic `PingAndWarm` requests are disabled by default. Use
-    /// [`Self::new_with_managed_transport_config`] to configure their rate.
+    /// `ping_and_warm_rps` sends periodic requests through the balanced channel pool, independently
+    /// of priming and refresh. Set it to `0` to disable periodic requests. Requests are not
+    /// guaranteed to visit every channel. Missed ticks are skipped instead of sent in a burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -476,58 +444,11 @@ impl BigTableConnection {
         prime_channels: bool,
         app_profile_id: Option<String>,
         max_channel_age: Option<Duration>,
+        ping_and_warm_rps: u32,
     ) -> Result<Self> {
-        Self::new_with_managed_transport_config(
-            project_id,
-            instance_name,
-            is_read_only,
-            timeout,
-            token_provider,
-            ManagedTransportConfig {
-                num_channels,
-                prime_channels,
-                app_profile_id,
-                max_channel_age,
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
-    /// Creates a managed Bigtable connection with optional background `PingAndWarm` traffic.
-    ///
-    /// A nonzero [`ManagedTransportConfig::ping_and_warm_rps`] starts a task that sends requests
-    /// through the balanced channel pool at the configured rate. This runs independently of
-    /// channel priming and refresh. Missed ticks are skipped instead of sent in a burst.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPingAndWarmRate`] when the requested rate would require an
-    /// interval shorter than one nanosecond.
-    pub async fn new_with_managed_transport_config(
-        project_id: &str,
-        instance_name: &str,
-        is_read_only: bool,
-        timeout: Option<Duration>,
-        token_provider: Arc<dyn TokenProvider>,
-        config: ManagedTransportConfig,
-    ) -> Result<Self> {
-        let ManagedTransportConfig {
-            num_channels,
-            prime_channels,
-            app_profile_id,
-            max_channel_age,
-            ping_and_warm_rps,
-        } = config;
         let ping_interval = match ping_and_warm_rps {
             0 => None,
-            rps => {
-                let interval = Duration::from_secs(1) / rps;
-                if interval.is_zero() {
-                    return Err(Error::InvalidPingAndWarmRate(rps));
-                }
-                Some(interval)
-            }
+            rps => Some((Duration::from_secs(1) / rps).max(Duration::from_nanos(1))),
         };
 
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
@@ -581,7 +502,7 @@ impl BigTableConnection {
                         })
                         .await
                     {
-                        warn!("Background PingAndWarm failed: {error}");
+                        info!("Background PingAndWarm failed: {error}");
                     }
                 }
             });
