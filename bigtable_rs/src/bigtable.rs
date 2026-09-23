@@ -121,7 +121,6 @@ use tower::{BoxError, Service, ServiceBuilder};
 
 use crate::auth_service::AuthSvc;
 use crate::bigtable::read_rows::{decode_read_rows_response, decode_read_rows_response_stream};
-use crate::{root_ca_certificate, util::get_row_range_from_prefix};
 use crate::google::bigtable::v2::{
     bigtable_client::BigtableClient, MutateRowRequest, MutateRowResponse, MutateRowsRequest,
     MutateRowsResponse, ReadRowsRequest, RowSet, SampleRowKeysRequest, SampleRowKeysResponse,
@@ -131,6 +130,7 @@ use crate::google::bigtable::v2::{
     ExecuteQueryRequest, ExecuteQueryResponse, PingAndWarmRequest, PrepareQueryRequest,
     PrepareQueryResponse, ProtoFormat, Type, Value,
 };
+use crate::{root_ca_certificate, util::get_row_range_from_prefix};
 
 pub mod read_rows;
 
