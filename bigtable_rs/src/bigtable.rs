@@ -424,16 +424,16 @@ impl BigTableConnection {
         })
     }
 
-    /// Returns a BigTable connection with a channel pool managed by a background task.
+    /// Returns a BigTable connection with a channel pool managed by background tasks.
     ///
-    /// The manager task is responsible for:
-    /// - Optionally pre-emptively refreshing channels every `max_connection_age`
+    /// The background tasks are responsible for:
+    /// - Optionally pre-emptively refreshing channels every `max_channel_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
-    ///
-    /// `ping_and_warm_rps` sends periodic requests through the balanced channel pool, independently
-    /// of priming and refresh. Set it to `0` to disable periodic requests. Requests are not
-    /// guaranteed to visit every channel. Missed ticks are skipped instead of sent in a burst.
+    /// - Optionally sending `ping_and_warm_rps` [`PingAndWarmRequest`]s per second through the
+    ///   balanced channel pool, independently of priming and refresh. Set it to `0` to disable
+    ///   periodic requests. Requests are not guaranteed to visit every channel; missed ticks
+    ///   are skipped instead of sent in a burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -444,11 +444,11 @@ impl BigTableConnection {
         prime_channels: bool,
         app_profile_id: Option<String>,
         max_channel_age: Option<Duration>,
-        ping_and_warm_rps: u32,
+        ping_and_warm_rps: u16,
     ) -> Result<Self> {
         let ping_interval = match ping_and_warm_rps {
             0 => None,
-            rps => Some((Duration::from_secs(1) / rps).max(Duration::from_nanos(1))),
+            rps => Some(Duration::from_secs(1) / u32::from(rps)),
         };
 
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
