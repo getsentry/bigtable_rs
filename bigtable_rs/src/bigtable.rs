@@ -472,11 +472,11 @@ impl BigTableConnection {
             instance_prefix.clone(),
             num_channels,
             prime_channels,
-            app_profile_id.clone(),
+            app_profile_id,
             max_channel_age,
             ping_and_warm_interval,
             tx,
-            client.clone(),
+            client,
         );
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
@@ -636,7 +636,7 @@ impl ChannelManager {
         loop {
             ticks.tick().await;
             if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                info!("Background PingAndWarm failed: {error}");
+                debug!("Background PingAndWarm failed: {error}");
             }
         }
     }
