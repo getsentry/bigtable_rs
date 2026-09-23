@@ -430,10 +430,10 @@ impl BigTableConnection {
     /// - Optionally pre-emptively refreshing channels every `max_channel_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
-    /// - Optionally sending `ping_and_warm_rps` [`PingAndWarmRequest`]s per second through the
-    ///   balanced channel pool, independently of priming and refresh. Set it to `0` to disable
-    ///   periodic requests. Requests are not guaranteed to visit every channel; missed ticks
-    ///   are skipped instead of sent in a burst.
+    /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through the
+    ///   balanced channel pool, independently of priming and refresh. Set the interval to
+    ///   [`Duration::ZERO`] to disable periodic requests. Requests are not guaranteed to visit
+    ///   every channel; missed ticks are skipped instead of sent in a burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -444,13 +444,8 @@ impl BigTableConnection {
         prime_channels: bool,
         app_profile_id: Option<String>,
         max_channel_age: Option<Duration>,
-        ping_and_warm_rps: u16,
+        ping_and_warm_interval: Duration,
     ) -> Result<Self> {
-        let ping_interval = match ping_and_warm_rps {
-            0 => None,
-            rps => Some(Duration::from_secs(1) / u32::from(rps)),
-        };
-
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
         let table_prefix = format!("{instance_prefix}/tables/");
         let endpoint = create_endpoint(timeout)?;
@@ -485,12 +480,12 @@ impl BigTableConnection {
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
 
-        if let Some(interval) = ping_interval {
+        if !ping_and_warm_interval.is_zero() {
             let mut client = client.clone();
             let name = instance_prefix.clone();
             let app_profile_id = app_profile_id.clone().unwrap_or_default();
             background_tasks.spawn(async move {
-                let mut ticks = tokio::time::interval(interval);
+                let mut ticks = tokio::time::interval(ping_and_warm_interval);
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 ticks.tick().await; // Avoid an immediate request during channel setup.
                 loop {
