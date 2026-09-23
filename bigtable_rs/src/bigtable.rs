@@ -431,9 +431,9 @@ impl BigTableConnection {
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
     /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through the
-    ///   balanced channel pool, independently of priming and refresh. Set the interval to
-    ///   [`Duration::ZERO`] to disable periodic requests. Requests are not guaranteed to visit
-    ///   every channel; missed ticks are skipped instead of sent in a burst.
+    ///   balanced channel pool, independently of priming and refresh. `None` or a zero interval
+    ///   disables periodic requests. Requests are not guaranteed to visit every channel; missed
+    ///   ticks are skipped instead of sent in a burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -444,7 +444,7 @@ impl BigTableConnection {
         prime_channels: bool,
         app_profile_id: Option<String>,
         max_channel_age: Option<Duration>,
-        ping_and_warm_interval: Duration,
+        ping_and_warm_interval: Option<Duration>,
     ) -> Result<Self> {
         let instance_prefix = format!("projects/{project_id}/instances/{instance_name}");
         let table_prefix = format!("{instance_prefix}/tables/");
@@ -480,12 +480,12 @@ impl BigTableConnection {
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
 
-        if !ping_and_warm_interval.is_zero() {
+        if let Some(interval) = ping_and_warm_interval.filter(|interval| !interval.is_zero()) {
             let mut client = client.clone();
             let name = instance_prefix.clone();
             let app_profile_id = app_profile_id.clone().unwrap_or_default();
             background_tasks.spawn(async move {
-                let mut ticks = tokio::time::interval(ping_and_warm_interval);
+                let mut ticks = tokio::time::interval(interval);
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 ticks.tick().await; // Avoid an immediate request during channel setup.
                 loop {
