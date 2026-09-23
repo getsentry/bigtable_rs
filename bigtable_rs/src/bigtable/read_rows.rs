@@ -1,13 +1,15 @@
-use crate::bigtable::{Error, Result, RowCell, RowKey};
-use crate::google::bigtable::v2::read_rows_response::cell_chunk::RowStatus;
-use crate::google::bigtable::v2::read_rows_response::CellChunk;
-use crate::google::bigtable::v2::ReadRowsResponse;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
 use futures_util::stream::iter;
 use futures_util::{Stream, StreamExt};
 use log::trace;
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
 use tonic::Streaming;
+
+use crate::bigtable::{Error, Result, RowCell, RowKey};
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::read_rows_response::cell_chunk::RowStatus;
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::read_rows_response::CellChunk;
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::ReadRowsResponse;
 
 /// As each `CellChunk` could be only part of a cell, this method reorganize multiple `CellChunk`
 /// from multiple `ReadRowsResponse` into a `Vec<(RowKey, Vec<RowCell>)>`.
@@ -220,6 +222,7 @@ pub fn decode_read_rows_response_to_vec(
         rows.push(Err(Error::ChunkError(
             "Invalid - last row missing commit".to_owned(),
         )));
+
         return rows;
     }
 
