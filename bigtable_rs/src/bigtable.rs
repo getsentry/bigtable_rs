@@ -424,9 +424,9 @@ impl BigTableConnection {
         })
     }
 
-    /// Returns a BigTable connection with a channel pool managed by background tasks.
+    /// Returns a BigTable connection with a channel pool managed by a background task.
     ///
-    /// The background tasks are responsible for:
+    /// The manager is responsible for:
     /// - Optionally pre-emptively refreshing channels every `max_channel_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
@@ -466,7 +466,7 @@ impl BigTableConnection {
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
 
-        let mut manager = ChannelManager::new(
+        let manager = ChannelManager::new(
             endpoint,
             token_provider.clone(),
             instance_prefix.clone(),
@@ -474,34 +474,12 @@ impl BigTableConnection {
             prime_channels,
             app_profile_id.clone(),
             max_channel_age,
+            ping_and_warm_interval,
             tx,
             client.clone(),
         );
         manager.seed().await?;
         background_tasks.spawn(async move { manager.run().await });
-
-        if let Some(interval) = ping_and_warm_interval.filter(|interval| !interval.is_zero()) {
-            let mut client = client.clone();
-            let name = instance_prefix.clone();
-            let app_profile_id = app_profile_id.clone().unwrap_or_default();
-            background_tasks.spawn(async move {
-                let mut ticks = tokio::time::interval(interval);
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                ticks.tick().await; // Avoid an immediate request during channel setup.
-                loop {
-                    ticks.tick().await;
-                    if let Err(error) = client
-                        .ping_and_warm(PingAndWarmRequest {
-                            name: name.clone(),
-                            app_profile_id: app_profile_id.clone(),
-                        })
-                        .await
-                    {
-                        info!("Background PingAndWarm failed: {error}");
-                    }
-                }
-            });
-        }
 
         let transport = ManagedTransport {
             inner: service,
@@ -579,6 +557,7 @@ struct ChannelManager {
     prime_channels: bool,
     app_profile_id: Option<String>,
     max_connection_age: Option<Duration>,
+    ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
     client: BigtableClient<AuthSvc>,
 }
@@ -592,6 +571,7 @@ impl ChannelManager {
         prime_channels: bool,
         app_profile_id: Option<String>,
         max_connection_age: Option<Duration>,
+        ping_and_warm_interval: Option<Duration>,
         change_sender: Sender<ChannelChange>,
         client: BigtableClient<AuthSvc>,
     ) -> Self {
@@ -603,6 +583,7 @@ impl ChannelManager {
             prime_channels,
             app_profile_id,
             max_connection_age,
+            ping_and_warm_interval,
             change_sender,
             client,
         }
@@ -630,6 +611,36 @@ impl ChannelManager {
         Ok(())
     }
 
+    async fn run(&self) {
+        tokio::join!(self.refresh_channels(), self.run_periodic_ping_and_warm());
+    }
+
+    fn ping_and_warm_request(&self) -> PingAndWarmRequest {
+        PingAndWarmRequest {
+            name: self.instance_prefix.clone(),
+            app_profile_id: self.app_profile_id.clone().unwrap_or_default(),
+        }
+    }
+
+    async fn run_periodic_ping_and_warm(&self) {
+        let Some(interval) = self
+            .ping_and_warm_interval
+            .filter(|interval| !interval.is_zero())
+        else {
+            return;
+        };
+        let mut client = self.client.clone();
+        let mut ticks = tokio::time::interval(interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticks.tick().await; // Avoid an immediate request during channel setup.
+        loop {
+            ticks.tick().await;
+            if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
+                info!("Background PingAndWarm failed: {error}");
+            }
+        }
+    }
+
     // Pre-emptively refreshes channels every `max_connection_age`, optionally priming them.
     //
     // Channel refresh is best-effort.
@@ -637,26 +648,20 @@ impl ChannelManager {
     // In case the pre-emptive refresh fails, causing a channel to stay alive for too long and
     // eventually be killed by the server, the underlying tonic `Channel` will handle this for us
     // transparently, but lazily.
-    async fn run(&mut self) {
+    async fn refresh_channels(&self) {
         let Some(max_age) = self.max_connection_age else {
             return;
         };
+        let mut client = self.client.clone();
         loop {
             // `Balance` only drains `ChannelStream` when polled through an actual request.
             // If the user doesn't run any request through the transport we're managing for the next
             // `max_age`, then `ChannelStream` won't be polled, and the next time we run this
             // loop (or the first time after calling `self.seed`), then `self.change_sender` will
             // attempt to send on a full channel.
-            // To work around that, we send a request through `self.client`, which shares the same
+            // To work around that, we send a request through `client`, which shares the same
             // underlying `Balance`, forcing it to drain the `ChannelChange`s we just inserted.
-            if let Err(e) = self
-                .client
-                .ping_and_warm(PingAndWarmRequest {
-                    name: self.instance_prefix.clone(),
-                    app_profile_id: self.app_profile_id.clone().unwrap_or_default(),
-                })
-                .await
-            {
+            if let Err(e) = client.ping_and_warm(self.ping_and_warm_request()).await {
                 warn!("Failed to force drain ChannelStream with PingAndWarm: {e}");
             }
 
