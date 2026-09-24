@@ -9,6 +9,7 @@
 //! [github repo]: https://github.com/liufuyang/bigtable_rs
 mod auth_service;
 pub mod bigtable;
+pub use googleapis_tonic_google_bigtable_v2::google;
 mod root_ca_certificate;
 pub mod util;
 
