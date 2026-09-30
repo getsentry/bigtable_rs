@@ -661,7 +661,7 @@ struct ChannelManager {
     max_connection_age: Option<Duration>,
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
-    // Balances requests between multiple channels
+    // Balances requests between all the channels.
     client: BigtableClient<AuthSvc>,
     // `BigTableClient`s each built directly on the underlying channels of `client`.
     clients: Mutex<Vec<BigtableClient<AuthSvc>>>,
