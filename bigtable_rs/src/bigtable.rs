@@ -535,8 +535,7 @@ impl BigTableConnection {
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` (empty if None)
     /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through each
     ///   channel in pool order, independently of priming and refresh. `None` or a zero interval
-    ///   disables periodic requests. Each sweep attempts every channel, even if an earlier request
-    ///   fails. Slow requests can delay a sweep; missed ticks are skipped instead of sent in a burst.
+    ///   disables periodic requests.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
