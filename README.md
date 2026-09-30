@@ -172,6 +172,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 ## Play with example code
 
+For a managed connection pool, use `BigTableConnection::new_managed(project_id, instance_name)`
+or customize it with a builder:
+
+```rust,no_run
+use bigtable_rs::bigtable::BigTableConnection;
+use std::time::Duration;
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let connection = BigTableConnection::managed_builder("project-1", "instance-1")
+        .num_channels(4)
+        .timeout(Some(Duration::from_secs(10)))
+        .app_profile_id("my-profile")
+        .build()
+        .await?;
+    let client = connection.client();
+    Ok(())
+}
+```
+
+The defaults are one channel, read/write credentials, no RPC timeout, channel priming enabled,
+rotation every 50 minutes, and warming every 30 seconds on each channel. The builder also supports
+an explicit token provider, read-only credentials, and disabling priming, rotation, or periodic
+warming. The warming application profile does not override the profile on data requests.
+Background tasks stop when the last connection or client is dropped.
+
+`BIGTABLE_EMULATOR_HOST` is respected, and `.emulator_endpoint("localhost:8086")` can override it.
+Emulator connections use the existing emulator transport without authentication or background
+channel management. The existing `new`, `new_with_token_provider`, and `new_with_emulator`
+constructors continue to use their original connection pools.
+
 To start develop or test the example code above,
 install [cbt](https://cloud.google.com/bigtable/docs/cbt-overview) tool if you haven't,
 then start a test Bigtable instance locally and insert some test data like this:
