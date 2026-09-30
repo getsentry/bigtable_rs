@@ -583,6 +583,9 @@ impl BigTableConnection {
             client,
         );
         manager.seed().await?;
+        if max_channel_age.is_some() {
+            manager.drain_channel_changes().await;
+        }
         background_tasks.spawn(async move { manager.run().await });
 
         let transport = ManagedTransport {
@@ -732,10 +735,6 @@ impl ChannelManager {
         if self.max_connection_age.is_none() && ping_ticks.is_none() {
             return;
         }
-        if self.max_connection_age.is_some() {
-            self.drain_channel_changes().await;
-        }
-
         let refresh_delay = tokio::time::sleep(self.max_connection_age.unwrap_or_default());
         tokio::pin!(refresh_delay);
         loop {
