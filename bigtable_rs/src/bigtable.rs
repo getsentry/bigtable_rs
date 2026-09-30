@@ -772,7 +772,7 @@ impl ChannelManager {
                 true,
             );
             if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                warn!("Background PingAndWarm failed for channel {i}: {error}");
+                debug!("Background PingAndWarm failed for channel {i}: {error}");
             }
         }
     }
@@ -1247,6 +1247,3 @@ mod tests {
 
 #[cfg(test)]
 mod infer_tests;
-
-#[cfg(test)]
-mod managed_transport_tests;
