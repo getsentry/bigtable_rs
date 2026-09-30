@@ -93,18 +93,22 @@ use std::time::Duration;
 
 use futures_util::Stream;
 use gcp_auth::TokenProvider;
+use http::{Request as HttpRequest, Response as HttpResponse};
 use log::info;
 use thiserror::Error;
 use tokio::net::UnixStream;
+use tonic::body::Body;
 use tonic::metadata::MetadataValue;
+use tonic::transport::channel::Change;
 use tonic::transport::Endpoint;
 use tonic::IntoRequest;
 use tonic::{
     codec::Streaming,
-    transport::{channel::Change, Channel, ClientTlsConfig},
+    transport::{Channel, ClientTlsConfig},
     Response,
 };
-use tower::ServiceBuilder;
+use tower::util::{BoxCloneSyncService, ServiceExt};
+use tower::{BoxError, Service, ServiceBuilder};
 
 use crate::auth_service::AuthSvc;
 use crate::bigtable::read_rows::{decode_read_rows_response, decode_read_rows_response_stream};
@@ -119,7 +123,10 @@ use crate::google::bigtable::v2::{
 };
 use crate::{root_ca_certificate, util::get_row_range_from_prefix};
 
+mod managed;
 pub mod read_rows;
+
+pub use managed::ManagedConnectionBuilder;
 
 pub trait RoutingMetadata {
     fn get_routing_header(&self) -> String;
@@ -222,6 +229,18 @@ impl std::convert::From<tonic::Status> for Error {
     fn from(err: tonic::Status) -> Self {
         Self::RpcError(err)
     }
+}
+
+/// The underlying `tower::Service` used to dispatch HTTP requests.
+pub(crate) type BoxTransport = BoxCloneSyncService<HttpRequest<Body>, HttpResponse<Body>, BoxError>;
+
+fn box_transport<T>(transport: T) -> BoxTransport
+where
+    T: Service<HttpRequest<Body>, Response = HttpResponse<Body>> + Clone + Send + Sync + 'static,
+    T::Error: Into<BoxError>,
+    T::Future: Send + 'static,
+{
+    BoxTransport::new(transport.map_err(Into::into))
 }
 
 fn insert_sql_routing_header(
@@ -383,34 +402,14 @@ impl BigTableConnection {
                 let channel_size = channel_size.max(1);
                 let (channel, tx) = Channel::balance_channel(channel_size);
                 for i in 0..channel_size {
-                    let endpoint = Channel::from_static("https://bigtable.googleapis.com")
-                        .tls_config(
-                            ClientTlsConfig::new()
-                                .ca_certificate(
-                                    root_ca_certificate::load()
-                                        .map_err(Error::CertificateError)
-                                        .expect("root certificate error"),
-                                )
-                                .domain_name("bigtable.googleapis.com"),
-                        )
-                        .map_err(Error::TransportError)?
-                        .http2_keep_alive_interval(Duration::from_secs(30))
-                        .keep_alive_timeout(Duration::from_secs(10))
-                        .keep_alive_while_idle(true);
-
-                    let endpoint = if let Some(timeout) = timeout {
-                        endpoint.timeout(timeout)
-                    } else {
-                        endpoint
-                    };
-
+                    let endpoint = create_endpoint(timeout)?;
                     // Use unique keys to ensure each channel has a dedicated HTTP connection
                     tx.try_send(Change::Insert(i, endpoint)).unwrap();
                 }
 
                 let token_provider = Some(token_provider);
                 Ok(Self {
-                    client: create_client(channel, token_provider, is_read_only),
+                    client: create_client(box_transport(channel), token_provider, is_read_only),
                     table_prefix: Arc::new(table_prefix),
                     instance_prefix: Arc::new(instance_prefix),
                     timeout: Arc::new(timeout),
@@ -484,7 +483,7 @@ impl BigTableConnection {
         };
 
         Ok(Self {
-            client: create_client(channel, None, is_read_only),
+            client: create_client(box_transport(channel), None, is_read_only),
             table_prefix: Arc::new(format!(
                 "projects/{}/instances/{}/tables/",
                 project_id, instance_name
@@ -496,7 +495,34 @@ impl BigTableConnection {
             timeout: Arc::new(timeout),
         })
     }
+}
 
+fn create_endpoint(timeout: Option<Duration>) -> Result<Endpoint> {
+    let endpoint = Channel::from_static("https://bigtable.googleapis.com")
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(
+                    root_ca_certificate::load()
+                        .map_err(Error::CertificateError)
+                        .expect("root certificate error"),
+                )
+                .domain_name("bigtable.googleapis.com"),
+        )
+        .map_err(Error::TransportError)?
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true);
+
+    let endpoint = if let Some(timeout) = timeout {
+        endpoint.timeout(timeout)
+    } else {
+        endpoint
+    };
+
+    Ok(endpoint)
+}
+
+impl BigTableConnection {
     /// Create a new BigTable client by cloning needed properties.
     ///
     /// Clients require `&mut self`, due to `Tonic::transport::Channel` limitations, however
@@ -519,10 +545,9 @@ impl BigTableConnection {
     }
 }
 
-/// Helper function to create a BigtableClient<AuthSvc>
-/// from a channel.
+/// Helper function to create a BigtableClient<AuthSvc> from a transport.
 fn create_client(
-    channel: Channel,
+    transport: BoxTransport,
     token_provider: Option<Arc<dyn TokenProvider>>,
     read_only: bool,
 ) -> BigtableClient<AuthSvc> {
@@ -534,8 +559,8 @@ fn create_client(
 
     let auth_svc = ServiceBuilder::new()
         .layer_fn(|c| AuthSvc::new(c, token_provider.clone(), scopes.to_string()))
-        .service(channel);
-    return BigtableClient::new(auth_svc);
+        .service(transport);
+    BigtableClient::new(auth_svc)
 }
 
 /// The core struct for Bigtable client, which wraps a gPRC client defined by Bigtable proto.
