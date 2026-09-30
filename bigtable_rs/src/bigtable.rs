@@ -663,7 +663,6 @@ struct ChannelManager {
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
     client: BigtableClient<AuthSvc>,
-    // The current channel in each pool slot, used to target periodic PingAndWarm requests.
     channels: Mutex<Vec<Channel>>,
 }
 
