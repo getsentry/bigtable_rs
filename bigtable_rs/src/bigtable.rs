@@ -661,8 +661,10 @@ struct ChannelManager {
     max_connection_age: Option<Duration>,
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
+    // `client` uses the balanced pool to drive discovery; `clients` send periodic pings
+    // directly to the underlying channels.
     client: BigtableClient<AuthSvc>,
-    channels: Mutex<Vec<Channel>>,
+    clients: Mutex<Vec<BigtableClient<AuthSvc>>>,
 }
 
 impl ChannelManager {
@@ -689,7 +691,7 @@ impl ChannelManager {
             ping_and_warm_interval,
             change_sender,
             client,
-            channels: Mutex::new(Vec::new()),
+            clients: Mutex::new(Vec::new()),
         }
     }
 
@@ -704,7 +706,12 @@ impl ChannelManager {
                 self.app_profile_id.clone(),
             )
             .await?;
-            self.channels.lock().unwrap().push(channel.clone());
+            let client = create_client(
+                box_transport(channel.clone()),
+                Some(self.token_provider.clone()),
+                true,
+            );
+            self.clients.lock().unwrap().push(client);
             let channel = PendingRequests::new(channel, CompleteOnResponse::default());
 
             // Will never error unless the channel is closed
@@ -739,13 +746,8 @@ impl ChannelManager {
         ticks.tick().await; // Avoid an immediate request during channel setup.
         loop {
             ticks.tick().await;
-            let channels = self.channels.lock().unwrap().clone();
-            for channel in channels {
-                let mut client = create_client(
-                    box_transport(channel),
-                    Some(self.token_provider.clone()),
-                    true,
-                );
+            let clients = self.clients.lock().unwrap().clone();
+            for mut client in clients {
                 if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
                     debug!("Background PingAndWarm failed: {error}");
                 }
@@ -804,7 +806,12 @@ impl ChannelManager {
                 )) {
                     warn!("Failed to send channel change {i}: {e}");
                 } else {
-                    self.channels.lock().unwrap()[i] = channel;
+                    let client = create_client(
+                        box_transport(channel),
+                        Some(self.token_provider.clone()),
+                        true,
+                    );
+                    self.clients.lock().unwrap()[i] = client;
                 }
             }
             debug!("Refreshed {} channels", self.num_channels);
