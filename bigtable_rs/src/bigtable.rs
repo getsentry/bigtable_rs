@@ -749,7 +749,7 @@ impl ChannelManager {
                     true,
                 );
                 if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                    debug!("Background PingAndWarm failed for channel {i}: {error}");
+                    debug!("Background PingAndWarm failed: {error}");
                 }
             }
         }
