@@ -739,8 +739,8 @@ impl ChannelManager {
         ticks.tick().await; // Avoid an immediate request during channel setup.
         loop {
             ticks.tick().await;
-            for i in 0..self.num_channels {
-                let channel = self.channels.lock().unwrap()[i].clone();
+            let channels = self.channels.lock().unwrap().clone();
+            for channel in channels {
                 let mut client = create_client(
                     box_transport(channel),
                     Some(self.token_provider.clone()),
