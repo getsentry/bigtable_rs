@@ -532,11 +532,12 @@ impl BigTableConnection {
     /// The manager is responsible for:
     /// - Optionally pre-emptively refreshing channels every `max_channel_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
-    ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
-    /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through the
-    ///   balanced channel pool, independently of priming and refresh. `None` or a zero interval
-    ///   disables periodic requests. Requests are not guaranteed to visit every channel; missed
-    ///   ticks are skipped instead of sent in a burst.
+    ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` (empty if None)
+    /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through each
+    ///   channel in pool order, independently of priming. `None` or a zero interval disables
+    ///   periodic requests. Each sweep attempts every channel, even if an earlier request fails.
+    ///   Refresh and warming run sequentially; slow requests can delay them, and missed ticks
+    ///   are skipped instead of sent in a burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -569,7 +570,7 @@ impl BigTableConnection {
         let mut background_tasks = tokio::task::JoinSet::new();
         background_tasks.spawn(worker);
 
-        let manager = ChannelManager::new(
+        let mut manager = ChannelManager::new(
             endpoint,
             token_provider.clone(),
             instance_prefix.clone(),
@@ -662,6 +663,7 @@ struct ChannelManager {
     max_connection_age: Option<Duration>,
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
+    channels: Vec<Channel>,
     client: BigtableClient<AuthSvc>,
 }
 
@@ -688,12 +690,13 @@ impl ChannelManager {
             max_connection_age,
             ping_and_warm_interval,
             change_sender,
+            channels: Vec::with_capacity(num_channels.max(1)),
             client,
         }
     }
 
     // Creates the initial channel pool, optionally priming channels.
-    async fn seed(&self) -> Result<()> {
+    async fn seed(&mut self) -> Result<()> {
         for i in 0..self.num_channels {
             let channel = create_channel(
                 self.endpoint.clone(),
@@ -703,19 +706,55 @@ impl ChannelManager {
                 self.app_profile_id.clone(),
             )
             .await?;
-            let channel = PendingRequests::new(channel, CompleteOnResponse::default());
+            let pending = PendingRequests::new(channel.clone(), CompleteOnResponse::default());
 
             // Will never error unless the channel is closed
             self.change_sender
-                .send(ChannelChange::Insert(i, channel))
+                .send(ChannelChange::Insert(i, pending))
                 .await
                 .ok();
+            self.channels.push(channel);
         }
         Ok(())
     }
 
-    async fn run(&self) {
-        tokio::join!(self.refresh_channels(), self.run_periodic_ping_and_warm());
+    async fn run(mut self) {
+        let mut ping_ticks = self
+            .ping_and_warm_interval
+            .filter(|interval| !interval.is_zero())
+            .map(|interval| {
+                let mut ticks =
+                    tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                ticks
+            });
+
+        if self.max_connection_age.is_none() && ping_ticks.is_none() {
+            return;
+        }
+        if self.max_connection_age.is_some() {
+            self.drain_channel_changes().await;
+        }
+
+        let refresh_delay = tokio::time::sleep(self.max_connection_age.unwrap_or_default());
+        tokio::pin!(refresh_delay);
+        loop {
+            tokio::select! {
+                _ = &mut refresh_delay, if self.max_connection_age.is_some() => {
+                    self.refresh_channels().await;
+                    self.drain_channel_changes().await;
+                    refresh_delay.as_mut().reset(
+                        tokio::time::Instant::now() + self.max_connection_age.unwrap(),
+                    );
+                }
+                _ = async {
+                    match &mut ping_ticks {
+                        Some(ticks) => { ticks.tick().await; }
+                        None => std::future::pending().await,
+                    }
+                } => self.ping_and_warm_channels().await,
+            }
+        }
     }
 
     fn ping_and_warm_request(&self) -> PingAndWarmRequest {
@@ -725,22 +764,28 @@ impl ChannelManager {
         }
     }
 
-    async fn run_periodic_ping_and_warm(&self) {
-        let Some(interval) = self
-            .ping_and_warm_interval
-            .filter(|interval| !interval.is_zero())
-        else {
-            return;
-        };
-        let mut client = self.client.clone();
-        let mut ticks = tokio::time::interval(interval);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        ticks.tick().await; // Avoid an immediate request during channel setup.
-        loop {
-            ticks.tick().await;
+    async fn ping_and_warm_channels(&self) {
+        for (i, channel) in self.channels.iter().enumerate() {
+            let mut client = create_client(
+                box_transport(channel.clone()),
+                Some(self.token_provider.clone()),
+                true,
+            );
             if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                debug!("Background PingAndWarm failed: {error}");
+                warn!("Background PingAndWarm failed for channel {i}: {error}");
             }
+        }
+    }
+
+    async fn drain_channel_changes(&mut self) {
+        // Direct channel pings bypass Balance. Keep a client through the pool to drive discovery
+        // even when there is no user traffic, so the next refresh has room to enqueue changes.
+        if let Err(e) = self
+            .client
+            .ping_and_warm(self.ping_and_warm_request())
+            .await
+        {
+            warn!("Failed to force drain ChannelStream with PingAndWarm: {e}");
         }
     }
 
@@ -751,53 +796,37 @@ impl ChannelManager {
     // In case the pre-emptive refresh fails, causing a channel to stay alive for too long and
     // eventually be killed by the server, the underlying tonic `Channel` will handle this for us
     // transparently, but lazily.
-    async fn refresh_channels(&self) {
-        let Some(max_age) = self.max_connection_age else {
-            return;
-        };
-        let mut client = self.client.clone();
-        loop {
-            // `Balance` only drains `ChannelStream` when polled through an actual request.
-            // If the user doesn't run any request through the transport we're managing for the next
-            // `max_age`, then `ChannelStream` won't be polled, and the next time we run this
-            // loop (or the first time after calling `self.seed`), then `self.change_sender` will
-            // attempt to send on a full channel.
-            // To work around that, we send a request through `client`, which shares the same
-            // underlying `Balance`, forcing it to drain the `ChannelChange`s we just inserted.
-            if let Err(e) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                warn!("Failed to force drain ChannelStream with PingAndWarm: {e}");
-            }
+    async fn refresh_channels(&mut self) {
+        debug!("Refreshing {} channels", self.num_channels);
 
-            tokio::time::sleep(max_age).await;
-            debug!("Refreshing {} channels", self.num_channels);
+        for i in 0..self.num_channels {
+            let channel = create_channel(
+                self.endpoint.clone(),
+                self.prime_channels,
+                self.token_provider.clone(),
+                self.instance_prefix.clone(),
+                self.app_profile_id.clone(),
+            )
+            .await;
 
-            for i in 0..self.num_channels {
-                let channel = create_channel(
-                    self.endpoint.clone(),
-                    self.prime_channels,
-                    self.token_provider.clone(),
-                    self.instance_prefix.clone(),
-                    self.app_profile_id.clone(),
-                )
-                .await;
-
-                let channel = match channel {
-                    Ok(ch) => ch,
-                    Err(e) => {
-                        warn!("Failed to create channel {i}: {e}");
-                        continue;
-                    }
-                };
-
-                if let Err(e) = self.change_sender.try_send(ChannelChange::Insert(
-                    i,
-                    PendingRequests::new(channel, CompleteOnResponse::default()),
-                )) {
-                    warn!("Failed to send channel change {i}: {e}");
+            let channel = match channel {
+                Ok(ch) => ch,
+                Err(e) => {
+                    warn!("Failed to create channel {i}: {e}");
+                    continue;
                 }
+            };
+
+            if let Err(e) = self.change_sender.try_send(ChannelChange::Insert(
+                i,
+                PendingRequests::new(channel.clone(), CompleteOnResponse::default()),
+            )) {
+                warn!("Failed to send channel change {i}: {e}");
+            } else {
+                self.channels[i] = channel;
             }
-            debug!("Refreshed {} channels", self.num_channels);
         }
+        debug!("Refreshed {} channels", self.num_channels);
     }
 }
 
@@ -1218,3 +1247,6 @@ mod tests {
 
 #[cfg(test)]
 mod infer_tests;
+
+#[cfg(test)]
+mod managed_transport_tests;
