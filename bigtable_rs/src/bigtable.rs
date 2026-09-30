@@ -88,7 +88,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::Stream;
@@ -533,10 +533,10 @@ impl BigTableConnection {
     /// - Optionally pre-emptively refreshing channels every `max_channel_age`
     /// - Optionally priming channels (both in the initial pool and new ones introduced by
     ///   refreshes) by sending a [`PingAndWarmRequest`] with the given `app_profile_id` ("default" if None)
-    /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` through the
-    ///   balanced channel pool, independently of priming and refresh. `None` or a zero interval
-    ///   disables periodic requests. Requests are not guaranteed to visit every channel; missed
-    ///   ticks are skipped instead of sent in a burst.
+    /// - Optionally sending a [`PingAndWarmRequest`] every `ping_and_warm_interval` to one channel
+    ///   at a time, rotating through the pool independently of priming and refresh. `None` or a
+    ///   zero interval disables periodic requests. Missed ticks are skipped instead of sent in a
+    ///   burst.
     pub async fn new_with_managed_transport(
         project_id: &str,
         instance_name: &str,
@@ -663,6 +663,8 @@ struct ChannelManager {
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
     client: BigtableClient<AuthSvc>,
+    // The current channel in each pool slot, used to target periodic PingAndWarm requests.
+    channels: Mutex<Vec<Channel>>,
 }
 
 impl ChannelManager {
@@ -689,6 +691,7 @@ impl ChannelManager {
             ping_and_warm_interval,
             change_sender,
             client,
+            channels: Mutex::new(Vec::new()),
         }
     }
 
@@ -703,6 +706,7 @@ impl ChannelManager {
                 self.app_profile_id.clone(),
             )
             .await?;
+            self.channels.lock().unwrap().push(channel.clone());
             let channel = PendingRequests::new(channel, CompleteOnResponse::default());
 
             // Will never error unless the channel is closed
@@ -732,14 +736,19 @@ impl ChannelManager {
         else {
             return;
         };
-        let mut client = self.client.clone();
         let mut ticks = tokio::time::interval(interval);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticks.tick().await; // Avoid an immediate request during channel setup.
-        loop {
+        for i in (0..self.num_channels).cycle() {
             ticks.tick().await;
+            let channel = self.channels.lock().unwrap()[i].clone();
+            let mut client = create_client(
+                box_transport(channel),
+                Some(self.token_provider.clone()),
+                true,
+            );
             if let Err(error) = client.ping_and_warm(self.ping_and_warm_request()).await {
-                debug!("Background PingAndWarm failed: {error}");
+                debug!("Background PingAndWarm failed for channel {i}: {error}");
             }
         }
     }
@@ -791,9 +800,11 @@ impl ChannelManager {
 
                 if let Err(e) = self.change_sender.try_send(ChannelChange::Insert(
                     i,
-                    PendingRequests::new(channel, CompleteOnResponse::default()),
+                    PendingRequests::new(channel.clone(), CompleteOnResponse::default()),
                 )) {
                     warn!("Failed to send channel change {i}: {e}");
+                } else {
+                    self.channels.lock().unwrap()[i] = channel;
                 }
             }
             debug!("Refreshed {} channels", self.num_channels);
