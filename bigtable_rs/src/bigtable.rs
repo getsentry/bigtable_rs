@@ -663,7 +663,8 @@ struct ChannelManager {
     change_sender: Sender<ChannelChange>,
     // Balances requests between all the channels.
     client: BigtableClient<AuthSvc>,
-    // `BigTableClient`s each built directly on the underlying channels of `client`.
+    // `BigTableClient`s each built directly on the underlying channels of `client`
+    // to provide direct access to those channels.
     clients: Mutex<Vec<BigtableClient<AuthSvc>>>,
 }
 
