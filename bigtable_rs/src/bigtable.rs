@@ -661,8 +661,7 @@ struct ChannelManager {
     max_connection_age: Option<Duration>,
     ping_and_warm_interval: Option<Duration>,
     change_sender: Sender<ChannelChange>,
-    // `client` uses the balanced pool to drive discovery; `clients` send periodic pings
-    // directly to the underlying channels.
+    // Balances requests between multiple channels
     client: BigtableClient<AuthSvc>,
     clients: Mutex<Vec<BigtableClient<AuthSvc>>>,
 }
